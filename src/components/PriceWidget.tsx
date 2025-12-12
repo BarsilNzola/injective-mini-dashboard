@@ -13,7 +13,7 @@ interface PriceWidgetProps {
 export default function PriceWidget({ trades, market, loading, error }: PriceWidgetProps) {
   const lastTrade = trades[0]
   const price = lastTrade?.price || '0'
-  const tickSize = market?.minPriceTickSize || '0.0001'
+  const tickSize = market?.minPriceTickSize || 0.0001 // Now a number
 
   if (loading) {
     return (
@@ -33,6 +33,21 @@ export default function PriceWidget({ trades, market, loading, error }: PriceWid
 
   const formattedPrice = formatPrice(price, tickSize)
   const numericPrice = parseFloat(price)
+
+  // Calculate 24h stats from trades (real data)
+  const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000
+  const recentTrades = trades.filter(trade => trade.timestamp > twentyFourHoursAgo)
+  
+  let highPrice = numericPrice
+  let lowPrice = numericPrice
+  
+  if (recentTrades.length > 0) {
+    const prices = recentTrades.map(t => parseFloat(t.price)).filter(p => !isNaN(p))
+    if (prices.length > 0) {
+      highPrice = Math.max(...prices)
+      lowPrice = Math.min(...prices)
+    }
+  }
 
   return (
     <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50">
@@ -54,19 +69,19 @@ export default function PriceWidget({ trades, market, loading, error }: PriceWid
           {formattedPrice}
         </div>
         <div className="text-sm text-gray-400">
-          ≈ ${(numericPrice * 1).toFixed(2)} USD
+          {market?.quoteDenom || ''}
         </div>
       </div>
       
-      {lastTrade && (
+      {lastTrade && recentTrades.length > 0 && (
         <div className="mt-4 pt-4 border-t border-gray-700/50">
           <div className="flex justify-between text-sm">
             <span className="text-gray-400">24h High</span>
-            <span className="text-green-400">{(numericPrice * 1.02).toFixed(4)}</span>
+            <span className="text-green-400">{formatPrice(highPrice.toString(), tickSize)}</span>
           </div>
           <div className="flex justify-between text-sm mt-2">
             <span className="text-gray-400">24h Low</span>
-            <span className="text-red-400">{(numericPrice * 0.98).toFixed(4)}</span>
+            <span className="text-red-400">{formatPrice(lowPrice.toString(), tickSize)}</span>
           </div>
         </div>
       )}

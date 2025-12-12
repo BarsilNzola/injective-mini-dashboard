@@ -29,6 +29,21 @@ export default function TradesList({ trades, market, loading, error }: TradesLis
     )
   }
 
+  // Calculate total volume from real trades
+  const totalVolume = trades.reduce((sum, trade) => {
+    const quantity = parseFloat(trade.quantity) || 0
+    return sum + quantity
+  }, 0)
+
+  // Calculate average price from real trades
+  const validPrices = trades
+    .map(trade => parseFloat(trade.price))
+    .filter(price => !isNaN(price))
+  
+  const averagePrice = validPrices.length > 0 
+    ? validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length
+    : 0
+
   return (
     <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50">
       <div className="flex justify-between items-center mb-6">
@@ -42,8 +57,8 @@ export default function TradesList({ trades, market, loading, error }: TradesLis
         <table className="w-full">
           <thead>
             <tr className="text-left text-xs text-gray-400 border-b border-gray-700/50">
-              <th className="pb-3 font-medium">Price</th>
-              <th className="pb-3 font-medium text-right">Amount</th>
+              <th className="pb-3 font-medium">Price ({market?.quoteDenom || ''})</th>
+              <th className="pb-3 font-medium text-right">Amount ({market?.baseDenom || ''})</th>
               <th className="pb-3 font-medium text-right">Time</th>
               <th className="pb-3 font-medium text-right">Side</th>
             </tr>
@@ -82,7 +97,7 @@ export default function TradesList({ trades, market, loading, error }: TradesLis
             ) : (
               <tr>
                 <td colSpan={4} className="py-8 text-center text-gray-500">
-                  No trades available
+                  No trades available for this market
                 </td>
               </tr>
             )}
@@ -94,18 +109,15 @@ export default function TradesList({ trades, market, loading, error }: TradesLis
         <div className="mt-4 pt-4 border-t border-gray-700/50">
           <div className="flex justify-between text-sm">
             <div>
-              <span className="text-gray-400">Total Volume (24h): </span>
+              <span className="text-gray-400">Total Volume: </span>
               <span className="text-gray-300">
-                {trades.reduce((sum, trade) => sum + (parseFloat(trade.quantity) || 0), 0).toFixed(2)}
+                {formatQuantity(totalVolume)} {market?.baseDenom || ''}
               </span>
             </div>
             <div>
               <span className="text-gray-400">Avg Price: </span>
               <span className="text-gray-300">
-                {formatPrice(
-                  trades.reduce((sum, trade) => sum + (parseFloat(trade.price) || 0), 0) / trades.length,
-                  tickSize
-                )}
+                {formatPrice(averagePrice.toString(), tickSize)} {market?.quoteDenom || ''}
               </span>
             </div>
           </div>

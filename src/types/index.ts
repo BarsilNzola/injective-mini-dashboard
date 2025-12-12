@@ -5,8 +5,9 @@ export interface Market {
   baseDenom: string;
   quoteDenom: string;
   type: 'spot' | 'derivatives';
-  minPriceTickSize: string;
-  minQuantityTickSize: string;
+  minPriceTickSize: number;
+  minQuantityTickSize: number;
+  marketStatus: string;
 }
 
 // Orderbook types
@@ -29,4 +30,13 @@ export interface Trade {
   timestamp: number;
   direction: 'buy' | 'sell';
   hash: string;
+}
+
+// Price types
+export interface PriceData {
+  price: string;
+  change24h: string;
+  high24h: string;
+  low24h: string;
+  volume24h: string;
 }

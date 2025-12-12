@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { injectiveClient } from '../api/injectiveClient'
 import { Orderbook, OrderbookEntry } from '../types'
+import { PriceLevel } from '@injectivelabs/sdk-ts'
 
 export function useOrderbook(marketId: string | null) {
   const [orderbook, setOrderbook] = useState<Orderbook>({ bids: [], asks: [] })
@@ -12,29 +13,36 @@ export function useOrderbook(marketId: string | null) {
     let intervalId: NodeJS.Timeout
 
     const fetchOrderbook = async () => {
-      if (!marketId) return
+      if (!marketId) {
+        setOrderbook({ bids: [], asks: [] })
+        setLoading(false)
+        return
+      }
 
       try {
         setLoading(true)
         const data = await injectiveClient.getSpotOrderbook(marketId)
         
         if (mounted && data) {
-          const formattedBids: OrderbookEntry[] = (data.bids || [])
-            .map(order => ({
+          const bids = data.bids || []
+          const asks = data.asks || []
+          
+          const formattedBids: OrderbookEntry[] = bids
+            .map((order: PriceLevel) => ({
               price: order.price,
               quantity: order.quantity,
-              timestamp: order.timestamp
+              timestamp: order.timestamp || Date.now()
             }))
-            .sort((a, b) => parseFloat(b.price) - parseFloat(a.price))
+            .sort((a: OrderbookEntry, b: OrderbookEntry) => parseFloat(b.price) - parseFloat(a.price))
             .slice(0, 10)
 
-          const formattedAsks: OrderbookEntry[] = (data.asks || [])
-            .map(order => ({
+          const formattedAsks: OrderbookEntry[] = asks
+            .map((order: PriceLevel) => ({
               price: order.price,
               quantity: order.quantity,
-              timestamp: order.timestamp
+              timestamp: order.timestamp || Date.now()
             }))
-            .sort((a, b) => parseFloat(a.price) - parseFloat(b.price))
+            .sort((a: OrderbookEntry, b: OrderbookEntry) => parseFloat(a.price) - parseFloat(b.price))
             .slice(0, 10)
 
           setOrderbook({

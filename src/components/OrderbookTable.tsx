@@ -32,6 +32,12 @@ export default function OrderbookTable({ orderbook, market, loading, error }: Or
   const maxBidQuantity = Math.max(...bids.map(b => parseFloat(b.quantity) || 0))
   const maxAskQuantity = Math.max(...asks.map(a => parseFloat(a.quantity) || 0))
 
+  // Calculate spread from real data
+  const bestBid = bids[0]?.price ? parseFloat(bids[0].price) : 0
+  const bestAsk = asks[0]?.price ? parseFloat(asks[0].price) : 0
+  const spread = bestBid > 0 && bestAsk > 0 ? bestAsk - bestBid : 0
+  const spreadPercentage = bestBid > 0 ? (spread / bestBid) * 100 : 0
+
   return (
     <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50">
       <div className="flex justify-between items-center mb-6">
@@ -47,8 +53,8 @@ export default function OrderbookTable({ orderbook, market, loading, error }: Or
           <div className="mb-4">
             <h3 className="text-sm font-medium text-green-400 mb-2">Bids (Buy)</h3>
             <div className="text-xs text-gray-400 grid grid-cols-2 mb-2">
-              <span>Price</span>
-              <span className="text-right">Size</span>
+              <span>Price ({market?.quoteDenom || ''})</span>
+              <span className="text-right">Size ({market?.baseDenom || ''})</span>
             </div>
           </div>
           <div className="space-y-1">
@@ -81,8 +87,8 @@ export default function OrderbookTable({ orderbook, market, loading, error }: Or
           <div className="mb-4">
             <h3 className="text-sm font-medium text-red-400 mb-2">Asks (Sell)</h3>
             <div className="text-xs text-gray-400 grid grid-cols-2 mb-2">
-              <span>Price</span>
-              <span className="text-right">Size</span>
+              <span>Price ({market?.quoteDenom || ''})</span>
+              <span className="text-right">Size ({market?.baseDenom || ''})</span>
             </div>
           </div>
           <div className="space-y-1">
@@ -111,17 +117,17 @@ export default function OrderbookTable({ orderbook, market, loading, error }: Or
         </div>
       </div>
 
-      {/* Spread */}
-      {bids.length > 0 && asks.length > 0 && (
+      {/* Spread - only show if we have both bids and asks */}
+      {bestBid > 0 && bestAsk > 0 && (
         <div className="mt-6 pt-4 border-t border-gray-700/50">
           <div className="flex justify-between items-center text-sm">
             <span className="text-gray-400">Spread</span>
             <div>
               <span className="text-gray-300">
-                {formatPrice(asks[0]?.price, tickSize)} - {formatPrice(bids[0]?.price, tickSize)}
+                {formatPrice(bestBid.toString(), tickSize)} - {formatPrice(bestAsk.toString(), tickSize)}
               </span>
               <span className="ml-2 text-yellow-400">
-                ({((parseFloat(asks[0]?.price) - parseFloat(bids[0]?.price)) / parseFloat(bids[0]?.price) * 100).toFixed(2)}%)
+                ({spreadPercentage.toFixed(2)}%)
               </span>
             </div>
           </div>

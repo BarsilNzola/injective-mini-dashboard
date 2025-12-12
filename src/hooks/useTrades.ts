@@ -11,15 +11,18 @@ export function useTrades(marketId: string | null) {
     let intervalId: NodeJS.Timeout
 
     const fetchTrades = async () => {
-      if (!marketId) return
+      if (!marketId) {
+        setTrades([])
+        setLoading(false)
+        return
+      }
 
       try {
         setLoading(true)
         const data = await injectiveClient.getSpotTrades(marketId)
         
         if (mounted && data) {
-          const formattedTrades = data.slice(0, 15)
-          setTrades(formattedTrades)
+          setTrades(data)
           setError(null)
         }
       } catch (err) {

@@ -35,7 +35,7 @@ export default function MarketSelector({
   if (!markets.length) {
     return (
       <div className="bg-gray-800 rounded-lg p-4 mb-6">
-        <p className="text-gray-400">No markets available</p>
+        <p className="text-gray-400">No active markets available on testnet</p>
       </div>
     )
   }

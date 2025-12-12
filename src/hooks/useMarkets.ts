@@ -24,9 +24,10 @@ export function useMarkets() {
               ticker: market.ticker,
               baseDenom: market.baseDenom,
               quoteDenom: market.quoteDenom,
-              type: 'spot',
+              type: 'spot' as const, // Explicitly set as const
               minPriceTickSize: market.minPriceTickSize,
-              minQuantityTickSize: market.minQuantityTickSize
+              minQuantityTickSize: market.minQuantityTickSize,
+              marketStatus: market.marketStatus
             }))
             .slice(0, 20)
 

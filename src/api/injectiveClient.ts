@@ -3,9 +3,12 @@ import {
   IndexerGrpcDerivativesApi,
   SpotMarket,
   DerivativeMarket,
-  OrderbookWithSequence,
   SpotTrade,
-  DerivativeTrade
+  DerivativeTrade,
+  TradeDirection,
+  PaginationOption,
+  IndexerGrpcOracleApi,
+  PriceLevel
 } from '@injectivelabs/sdk-ts'
 import { Network, getNetworkEndpoints } from '@injectivelabs/networks'
 
@@ -14,11 +17,11 @@ const NETWORK = Network.Testnet
 const ENDPOINTS = getNetworkEndpoints(NETWORK)
 
 export interface MarketSummary {
-  lastPrice?: string;
-  highPrice?: string;
-  lowPrice?: string;
-  volume?: string;
-  change?: string;
+  lastPrice: string;
+  highPrice: string;
+  lowPrice: string;
+  volume: string;
+  change: string;
 }
 
 export interface FormattedTrade {
@@ -30,19 +33,20 @@ export interface FormattedTrade {
   hash: string;
 }
 
-export interface FormattedOrderbookEntry {
-  price: string;
-  quantity: string;
-  timestamp: number;
+export interface FormattedOrderbook {
+  bids: PriceLevel[];
+  asks: PriceLevel[];
 }
 
 class InjectiveClient {
   private spotApi: IndexerGrpcSpotApi;
   private derivativesApi: IndexerGrpcDerivativesApi;
+  private oracleApi: IndexerGrpcOracleApi;
 
   constructor() {
     this.spotApi = new IndexerGrpcSpotApi(ENDPOINTS.indexer)
     this.derivativesApi = new IndexerGrpcDerivativesApi(ENDPOINTS.indexer)
+    this.oracleApi = new IndexerGrpcOracleApi(ENDPOINTS.indexer)
   }
 
   async getSpotMarkets(): Promise<SpotMarket[]> {
@@ -65,20 +69,36 @@ class InjectiveClient {
     }
   }
 
-  async getSpotOrderbook(marketId: string): Promise<OrderbookWithSequence> {
+  async getSpotOrderbook(marketId: string): Promise<FormattedOrderbook> {
     try {
-      const orderbook = await this.spotApi.fetchOrderbookV2(marketId)
-      return orderbook
+      const orderbook = await this.spotApi.fetchOrderbookV2(marketId) as any
+      
+      // Handle different possible response structures
+      const bids = orderbook?.bids || orderbook?.buys || orderbook?.orderbook?.bids || []
+      const asks = orderbook?.asks || orderbook?.sells || orderbook?.orderbook?.asks || []
+      
+      return {
+        bids: Array.isArray(bids) ? bids : [],
+        asks: Array.isArray(asks) ? asks : []
+      }
     } catch (error) {
       console.error('Error fetching spot orderbook:', error)
       throw error
     }
   }
 
-  async getDerivativesOrderbook(marketId: string): Promise<OrderbookWithSequence> {
+  async getDerivativesOrderbook(marketId: string): Promise<FormattedOrderbook> {
     try {
-      const orderbook = await this.derivativesApi.fetchOrderbookV2(marketId)
-      return orderbook
+      const orderbook = await this.derivativesApi.fetchOrderbookV2(marketId) as any
+      
+      // Handle different possible response structures
+      const bids = orderbook?.bids || orderbook?.buys || orderbook?.orderbook?.bids || []
+      const asks = orderbook?.asks || orderbook?.sells || orderbook?.orderbook?.asks || []
+      
+      return {
+        bids: Array.isArray(bids) ? bids : [],
+        asks: Array.isArray(asks) ? asks : []
+      }
     } catch (error) {
       console.error('Error fetching derivatives orderbook:', error)
       throw error
@@ -87,22 +107,24 @@ class InjectiveClient {
 
   async getSpotTrades(marketId: string): Promise<FormattedTrade[]> {
     try {
+      const pagination: PaginationOption = {
+        limit: 20
+      }
+      
       const response = await this.spotApi.fetchTrades({
         marketId,
-        direction: 'desc',
-        pagination: {
-          limit: 20
-        }
+        direction: TradeDirection.Sell,
+        pagination
       })
 
       const trades = response.trades || []
       return trades.map((trade: SpotTrade) => ({
         id: trade.tradeId || '',
-        price: trade.price?.price || '0',
+        price: trade.price || '0',
         quantity: trade.quantity || '0',
         timestamp: trade.executedAt || Date.now(),
         direction: trade.tradeDirection === 'buy' ? 'buy' : 'sell',
-        hash: trade.tradeHash || ''
+        hash: trade.tradeId || ''
       }))
     } catch (error) {
       console.error('Error fetching spot trades:', error)
@@ -112,22 +134,24 @@ class InjectiveClient {
 
   async getDerivativesTrades(marketId: string): Promise<FormattedTrade[]> {
     try {
+      const pagination: PaginationOption = {
+        limit: 20
+      }
+      
       const response = await this.derivativesApi.fetchTrades({
         marketId,
-        direction: 'desc',
-        pagination: {
-          limit: 20
-        }
+        direction: TradeDirection.Sell,
+        pagination
       })
 
       const trades = response.trades || []
       return trades.map((trade: DerivativeTrade) => ({
         id: trade.tradeId || '',
-        price: trade.price?.price || '0',
-        quantity: trade.quantity || '0',
+        price: trade.executionPrice || '0',
+        quantity: trade.executionQuantity || '0',
         timestamp: trade.executedAt || Date.now(),
         direction: trade.tradeDirection === 'buy' ? 'buy' : 'sell',
-        hash: trade.tradeHash || ''
+        hash: trade.tradeId || ''
       }))
     } catch (error) {
       console.error('Error fetching derivatives trades:', error)
@@ -135,35 +159,18 @@ class InjectiveClient {
     }
   }
 
-  async getMarketSummary(marketId: string): Promise<MarketSummary> {
+  async getOraclePrice(pair: string): Promise<string> {
     try {
-      // For now, we'll create a mock summary since fetchMarketSummary might not exist
-      // We'll use the latest trades to simulate summary data
-      const trades = await this.getSpotTrades(marketId)
+      const oraclePrices = await this.oracleApi.fetchOraclePriceNoThrow({
+        oracleType: 'bandibc' as any,
+        baseSymbol: pair.split('/')[0] || '',
+        quoteSymbol: pair.split('/')[1] || pair,
+      })
       
-      if (trades.length === 0) {
-        return {
-          lastPrice: '0',
-          highPrice: '0',
-          lowPrice: '0',
-          volume: '0',
-          change: '0'
-        }
-      }
-
-      const prices = trades.map(t => parseFloat(t.price))
-      const volumes = trades.map(t => parseFloat(t.quantity))
-      
-      return {
-        lastPrice: trades[0].price,
-        highPrice: Math.max(...prices).toString(),
-        lowPrice: Math.min(...prices).toString(),
-        volume: volumes.reduce((sum, vol) => sum + vol, 0).toString(),
-        change: '0' // Calculate if we had previous data
-      }
+      return oraclePrices?.price || '0'
     } catch (error) {
-      console.error('Error fetching market summary:', error)
-      throw error
+      console.error('Error fetching oracle price:', error)
+      return '0'
     }
   }
 }
