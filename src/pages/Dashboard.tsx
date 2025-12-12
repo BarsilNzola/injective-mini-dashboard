@@ -7,6 +7,7 @@ import MarketSelector from '../components/MarketSelector'
 import PriceWidget from '../components/PriceWidget'
 import OrderbookTable from '../components/OrderbookTable'
 import TradesList from '../components/TradesList'
+import PriceChart from '../components/PriceChart'
 
 export default function Dashboard() {
   const { markets, loading: marketsLoading, error: marketsError } = useMarkets()
@@ -37,7 +38,7 @@ export default function Dashboard() {
 
       {selectedMarket ? (
         <>
-          {/* Price and Stats Row */}
+          {/* Top Row: Price Widget and Orderbook */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-1">
               <PriceWidget
@@ -57,7 +58,17 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Trades List */}
+          {/* Middle Row: Price Chart */}
+          <div>
+            <PriceChart
+              trades={trades}
+              market={selectedMarket}
+              loading={tradesLoading}
+              error={tradesError}
+            />
+          </div>
+
+          {/* Bottom Row: Trades List */}
           <div>
             <TradesList
               trades={trades}

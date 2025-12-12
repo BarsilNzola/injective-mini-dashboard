@@ -15,6 +15,7 @@ body {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
+/* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
 }
@@ -30,4 +31,138 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #6b7280;
+}
+
+/* Chart animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-out;
+}
+
+/* Candlestick chart animations */
+@keyframes pulse-subtle {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+/* Price change animations */
+@keyframes priceUp {
+  0% {
+    color: #10B981;
+    transform: scale(1);
+  }
+  50% {
+    color: #34D399;
+    transform: scale(1.05);
+  }
+  100% {
+    color: #10B981;
+    transform: scale(1);
+  }
+}
+
+@keyframes priceDown {
+  0% {
+    color: #EF4444;
+    transform: scale(1);
+  }
+  50% {
+    color: #F87171;
+    transform: scale(1.05);
+  }
+  100% {
+    color: #EF4444;
+    transform: scale(1);
+  }
+}
+
+.price-up {
+  animation: priceUp 0.5s ease-in-out;
+}
+
+.price-down {
+  animation: priceDown 0.5s ease-in-out;
+}
+
+/* Chart tooltip transitions */
+.recharts-tooltip-wrapper {
+  transition: all 0.2s ease-in-out;
+}
+
+/* Loading shimmer effect */
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, #1f2937 25%, #374151 50%, #1f2937 75%);
+  background-size: 1000px 100%;
+  animation: shimmer 2s infinite linear;
+}
+
+/* Grid line enhancements */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke-dasharray: 3 3;
+  stroke: #374151;
+}
+
+/* Candle wick animation */
+@keyframes candleWick {
+  0% {
+    stroke-opacity: 0.5;
+  }
+  50% {
+    stroke-opacity: 1;
+  }
+  100% {
+    stroke-opacity: 0.5;
+  }
+}
+
+/* Smooth transitions for UI elements */
+* {
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+/* Improve focus styles for accessibility */
+button:focus, 
+select:focus, 
+input:focus {
+  outline: 2px solid #3B82F6;
+  outline-offset: 2px;
+  border-color: transparent;
+}
+
+/* Custom chart hover effects */
+.recharts-bar-rectangle:hover {
+  opacity: 0.8;
+}
+
+/* Make sure tooltips appear above everything */
+.recharts-tooltip-wrapper {
+  z-index: 1000;
 }

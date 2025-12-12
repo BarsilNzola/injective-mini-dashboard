@@ -19,6 +19,7 @@ export default function PriceWidget({ trades, market, loading, error }: PriceWid
   
   // Track previous values for animation
   const [isUpdating, setIsUpdating] = useState(false)
+  const [priceDirection, setPriceDirection] = useState<'up' | 'down' | 'none'>('none')
   const previousPriceRef = useRef<string>('')
   const previousTimestampRef = useRef<number>(0)
   const updateCountRef = useRef(0)
@@ -26,8 +27,8 @@ export default function PriceWidget({ trades, market, loading, error }: PriceWid
   // Format the price - this will recalculate when any dependency changes
   const formattedPrice = useMemo(() => {
     if (!latestPrice || latestPrice === '0') return '0'
-    return formatPrice(latestPrice, tickSize, market?.baseDenom, market?.quoteDenom)
-  }, [latestPrice, tickSize, market?.baseDenom, market?.quoteDenom])
+    return formatPrice(latestPrice, market?.baseDenom, market?.quoteDenom) // Removed tickSize argument
+  }, [latestPrice, market?.baseDenom, market?.quoteDenom])
 
   // Animation effect - trigger on any price or timestamp change
   useEffect(() => {
@@ -36,16 +37,28 @@ export default function PriceWidget({ trades, market, loading, error }: PriceWid
     
     if ((priceChanged || timeChanged) && latestPrice !== '0' && previousPriceRef.current !== '0') {
       setIsUpdating(true)
+      
+      // Determine price direction for animation
+      const prevPriceNum = parseFloat(previousPriceRef.current) || 0
+      const currentPriceNum = parseFloat(latestPrice) || 0
+      const direction = currentPriceNum > prevPriceNum ? 'up' : currentPriceNum < prevPriceNum ? 'down' : 'none'
+      setPriceDirection(direction)
+      
       updateCountRef.current += 1
       console.log(`PriceWidget update #${updateCountRef.current}:`, {
         oldPrice: previousPriceRef.current,
         newPrice: latestPrice,
         formatted: formattedPrice,
+        direction,
         oldTime: new Date(previousTimestampRef.current).toISOString(),
         newTime: new Date(latestTimestamp).toISOString()
       })
       
-      const timer = setTimeout(() => setIsUpdating(false), 500)
+      const timer = setTimeout(() => {
+        setIsUpdating(false)
+        setPriceDirection('none')
+      }, 500)
+      
       previousPriceRef.current = latestPrice
       previousTimestampRef.current = latestTimestamp
       return () => clearTimeout(timer)
@@ -80,6 +93,12 @@ export default function PriceWidget({ trades, market, loading, error }: PriceWid
     
     return { highPrice: high, lowPrice: low }
   }, [trades, formattedPrice, market?.baseDenom, market?.quoteDenom])
+
+  // Determine animation class based on price direction
+  const priceAnimationClass = useMemo(() => {
+    if (!isUpdating) return ''
+    return priceDirection === 'up' ? 'price-up' : priceDirection === 'down' ? 'price-down' : ''
+  }, [isUpdating, priceDirection])
 
   if (loading && trades.length === 0) {
     return (
@@ -121,7 +140,9 @@ export default function PriceWidget({ trades, market, loading, error }: PriceWid
       </div>
       
       <div className="text-center py-4">
-        <div className={`text-4xl font-bold mb-2 transition-all duration-300 ${isUpdating ? 'text-white scale-105' : 'text-white'}`}>
+        <div className={`text-4xl font-bold mb-2 transition-all duration-300 ${
+          isUpdating ? 'scale-105' : ''
+        } ${priceAnimationClass}`}>
           {loading && trades.length === 0 ? (
             <div className="h-12 flex items-center justify-center">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
