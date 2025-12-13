@@ -68,7 +68,8 @@ export function convertPriceFromApi(
 }
 
 export function formatPrice(
-  price: string | number,
+  price: string | number, 
+  tickSize: string | number = 0.0001,
   baseDenom: string = '',
   quoteDenom: string = ''
 ): string {

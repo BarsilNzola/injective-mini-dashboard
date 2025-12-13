@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useMarkets } from '../hooks/useMarkets'
 import { useOrderbook } from '../hooks/useOrderbook'
 import { useTrades } from '../hooks/useTrades'
@@ -12,10 +12,15 @@ import PriceChart from '../components/PriceChart'
 export default function Dashboard() {
   const { markets, loading: marketsLoading, error: marketsError } = useMarkets()
   const [selectedMarket, setSelectedMarket] = useState<Market | null>(null)
+  
+  // Use a ref to track initial selection
+  const initialSelectionDone = useRef(false)
 
   useEffect(() => {
-    if (markets.length > 0 && !selectedMarket) {
+    // Only set initial market once when markets are loaded
+    if (markets.length > 0 && !selectedMarket && !initialSelectionDone.current) {
       setSelectedMarket(markets[0])
+      initialSelectionDone.current = true
     }
   }, [markets, selectedMarket])
 
@@ -42,6 +47,7 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-1">
               <PriceWidget
+                key={`price-${selectedMarket.id}`} // Force re-render on market change
                 trades={trades}
                 market={selectedMarket}
                 loading={tradesLoading}
@@ -50,6 +56,7 @@ export default function Dashboard() {
             </div>
             <div className="lg:col-span-2">
               <OrderbookTable
+                key={`orderbook-${selectedMarket.id}`} // Force re-render on market change
                 orderbook={orderbook}
                 market={selectedMarket}
                 loading={orderbookLoading}
@@ -61,6 +68,7 @@ export default function Dashboard() {
           {/* Middle Row: Price Chart */}
           <div>
             <PriceChart
+              key={`chart-${selectedMarket.id}`} // Force re-render on market change
               trades={trades}
               market={selectedMarket}
               loading={tradesLoading}
@@ -71,6 +79,7 @@ export default function Dashboard() {
           {/* Bottom Row: Trades List */}
           <div>
             <TradesList
+              key={`trades-${selectedMarket.id}`} // Force re-render on market change
               trades={trades}
               market={selectedMarket}
               loading={tradesLoading}

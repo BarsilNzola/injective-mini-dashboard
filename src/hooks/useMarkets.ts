@@ -11,9 +11,12 @@ export function useMarkets() {
     let mounted = true
     let intervalId: NodeJS.Timeout
 
-    const fetchMarkets = async () => {
+    const fetchMarkets = async (isInitialLoad = false) => {
       try {
-        setLoading(true)
+        if (isInitialLoad) {
+          setLoading(true)
+        }
+        
         const spotMarkets = await injectiveClient.getSpotMarkets()
         
         if (mounted) {
@@ -24,7 +27,7 @@ export function useMarkets() {
               ticker: market.ticker,
               baseDenom: market.baseDenom,
               quoteDenom: market.quoteDenom,
-              type: 'spot' as const, // Explicitly set as const
+              type: 'spot' as const,
               minPriceTickSize: market.minPriceTickSize,
               minQuantityTickSize: market.minQuantityTickSize,
               marketStatus: market.marketStatus
@@ -40,15 +43,17 @@ export function useMarkets() {
           console.error('Error in useMarkets:', err)
         }
       } finally {
-        if (mounted) {
+        if (mounted && isInitialLoad) {
           setLoading(false)
         }
       }
     }
 
-    fetchMarkets()
+    // Initial load
+    fetchMarkets(true)
 
-    intervalId = setInterval(fetchMarkets, 30000)
+    // Auto-refresh every 30 seconds WITHOUT showing loading state
+    intervalId = setInterval(() => fetchMarkets(false), 30000)
 
     return () => {
       mounted = false

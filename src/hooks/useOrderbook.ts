@@ -7,7 +7,9 @@ export function useOrderbook(marketId: string | null) {
   const [orderbook, setOrderbook] = useState<Orderbook>({ bids: [], asks: [] })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const lastUpdateTimeRef = useRef<number>(0)
+  const previousBidsRef = useRef<string>('')
+  const previousAsksRef = useRef<string>('')
+  const previousMarketIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     let mounted = true
@@ -15,8 +17,12 @@ export function useOrderbook(marketId: string | null) {
 
     const fetchOrderbook = async () => {
       if (!marketId) {
-        setOrderbook({ bids: [], asks: [] })
-        setLoading(false)
+        if (mounted) {
+          setOrderbook({ bids: [], asks: [] })
+          setLoading(false)
+          previousBidsRef.current = ''
+          previousAsksRef.current = ''
+        }
         return
       }
 
@@ -46,22 +52,34 @@ export function useOrderbook(marketId: string | null) {
             .sort((a: OrderbookEntry, b: OrderbookEntry) => parseFloat(a.price) - parseFloat(b.price))
             .slice(0, 10)
 
-          // Simple check: if either bids or asks have changed
-          const newBidsString = JSON.stringify(formattedBids.map(b => b.price).slice(0, 3))
-          const newAsksString = JSON.stringify(formattedAsks.map(a => a.price).slice(0, 3))
-          const oldBidsString = JSON.stringify(orderbook.bids.map(b => b.price).slice(0, 3))
-          const oldAsksString = JSON.stringify(orderbook.asks.map(a => a.price).slice(0, 3))
+          // Create string representations for comparison
+          const newBidsString = JSON.stringify(formattedBids.map(b => b.price))
+          const newAsksString = JSON.stringify(formattedAsks.map(a => a.price))
           
-          console.log(`Orderbook comparison: bids changed=${newBidsString !== oldBidsString}, asks changed=${newAsksString !== oldAsksString}`)
+          // Reset comparison when market changes
+          const marketChanged = previousMarketIdRef.current !== marketId
+          if (marketChanged) {
+            console.log(`Market changed from ${previousMarketIdRef.current} to ${marketId}, forcing update`)
+            previousMarketIdRef.current = marketId
+            previousBidsRef.current = ''
+            previousAsksRef.current = ''
+          }
           
-          // Update if data changed
-          if (newBidsString !== oldBidsString || newAsksString !== oldAsksString) {
+          // Check if data actually changed
+          const bidsChanged = newBidsString !== previousBidsRef.current
+          const asksChanged = newAsksString !== previousAsksRef.current
+          
+          console.log(`Orderbook comparison: bids changed=${bidsChanged}, asks changed=${asksChanged}`)
+          
+          // Update if data changed or market changed
+          if (bidsChanged || asksChanged || marketChanged) {
             console.log('Orderbook changed, updating UI')
             setOrderbook({
               bids: formattedBids,
               asks: formattedAsks
             })
-            lastUpdateTimeRef.current = Date.now()
+            previousBidsRef.current = newBidsString
+            previousAsksRef.current = newAsksString
             setError(null)
           } else {
             console.log('Orderbook unchanged, skipping update')
@@ -87,9 +105,8 @@ export function useOrderbook(marketId: string | null) {
     return () => {
       mounted = false
       clearInterval(intervalId)
-      lastUpdateTimeRef.current = 0
     }
-  }, [marketId, orderbook.bids, orderbook.asks])
+  }, [marketId])
 
   return { orderbook, loading, error }
 }

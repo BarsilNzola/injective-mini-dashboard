@@ -3,6 +3,7 @@ import {
   IndexerGrpcDerivativesApi,
   SpotMarket,
   DerivativeMarket,
+  SpotTrade,
   DerivativeTrade,
   TradeDirection,
   PaginationOption,

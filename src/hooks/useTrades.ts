@@ -6,6 +6,7 @@ export function useTrades(marketId: string | null) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const previousPriceRef = useRef<string>('')
+  const previousMarketIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     let mounted = true
@@ -13,8 +14,11 @@ export function useTrades(marketId: string | null) {
 
     const fetchTrades = async () => {
       if (!marketId) {
-        setTrades([])
-        setLoading(false)
+        if (mounted) {
+          setTrades([])
+          setLoading(false)
+          previousPriceRef.current = ''
+        }
         return
       }
 
@@ -25,19 +29,25 @@ export function useTrades(marketId: string | null) {
         if (mounted && data && data.length > 0) {
           const latestTrade = data[0]
           const latestPrice = latestTrade?.price || '0'
+          
+          // Reset comparison when market changes
+          const marketChanged = previousMarketIdRef.current !== marketId
+          if (marketChanged) {
+            console.log(`Market changed from ${previousMarketIdRef.current} to ${marketId}, forcing update`)
+            previousMarketIdRef.current = marketId
+            previousPriceRef.current = ''
+          }
+          
           const previousPrice = previousPriceRef.current
           
           console.log(`Price comparison: new=${latestPrice}, old=${previousPrice}, changed=${latestPrice !== previousPrice}`)
           
-          // Always update on first load or when price changes
-          if (previousPrice === '' || latestPrice !== previousPrice) {
+          // Always update on first load, price changes, or market changes
+          if (previousPrice === '' || latestPrice !== previousPrice || marketChanged) {
             console.log(`Price changed from ${previousPrice} to ${latestPrice}, updating UI`)
             setTrades(data)
             previousPriceRef.current = latestPrice
             setError(null)
-            
-            // Also log the formatted price for debugging
-            console.log(`New price detected: ${latestPrice}`)
           } else {
             console.log('Price unchanged, skipping full update')
           }
@@ -65,9 +75,8 @@ export function useTrades(marketId: string | null) {
     return () => {
       mounted = false
       clearInterval(intervalId)
-      previousPriceRef.current = ''
     }
-  }, [marketId])
+  }, [marketId]) // Only depend on marketId
 
   return { trades, loading, error }
 }

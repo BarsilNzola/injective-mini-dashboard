@@ -1,18 +1,8 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import { 
-  ComposedChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer,
-  ReferenceLine,
-  TooltipProps
-} from 'recharts'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickSeries, Time } from 'lightweight-charts'
 import { FormattedTrade } from '../api/injectiveClient'
 import { Market } from '../types'
-import { convertPriceFromApi } from '../utils/format'
+import { convertPriceFromApi, formatPrice } from '../utils/format'
 import Loader from './Loader'
 
 interface PriceChartProps {
@@ -28,35 +18,6 @@ interface Timeframe {
   interval: string
 }
 
-interface CandlestickData {
-  time: string
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
-  timestamp: number
-  isBullish: boolean
-}
-
-interface CandlestickTooltipProps extends TooltipProps<number, string> {
-  active?: boolean
-  payload?: any[]
-  label?: string
-}
-
-interface CandlestickBarProps {
-  x?: number
-  y?: number
-  width?: number
-  height?: number
-  low: number
-  high: number
-  open: number
-  close: number
-  isBullish: boolean
-}
-
 // Available timeframes
 const TIMEFRAMES: Timeframe[] = [
   { label: '1m', value: 60 * 1000, interval: '1 minute' },
@@ -67,135 +28,62 @@ const TIMEFRAMES: Timeframe[] = [
   { label: '1D', value: 24 * 60 * 60 * 1000, interval: '1 day' },
 ]
 
-const CandlestickTooltip: React.FC<CandlestickTooltipProps> = ({ active, payload, label }) => {
-  if (active && payload && payload.length) {
-    const data = payload[0].payload as CandlestickData
-    return (
-      <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 shadow-lg min-w-[180px]">
-        <p className="text-sm text-gray-400 mb-2">{label}</p>
-        <div className="space-y-1">
-          <div className="flex justify-between">
-            <span className="text-gray-400">Open:</span>
-            <span className="text-gray-300">{data.open.toFixed(6)}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-400">High:</span>
-            <span className="text-green-400">{data.high.toFixed(6)}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-400">Low:</span>
-            <span className="text-red-400">{data.low.toFixed(6)}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-400">Close:</span>
-            <span className={`font-semibold ${data.isBullish ? 'text-green-400' : 'text-red-400'}`}>
-              {data.close.toFixed(6)}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-400">Change:</span>
-            <span className={`font-semibold ${data.isBullish ? 'text-green-400' : 'text-red-400'}`}>
-              {data.isBullish ? '+' : ''}{((data.close - data.open) / data.open * 100).toFixed(2)}%
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-400">Volume:</span>
-            <span className="text-blue-400">{data.volume.toFixed(4)}</span>
-          </div>
-        </div>
-      </div>
-    )
-  }
-  return null
-}
-
-const CandlestickBar: React.FC<CandlestickBarProps> = (props) => {
-  const { x = 0, y = 0, width = 0, height = 0, low, high, open, close, isBullish } = props
-  
-  if (!width || !height) return null
-  
-  // Candlestick calculations
-  const candleTop = Math.min(open, close)
-  const candleBottom = Math.max(open, close)
-  const candleHeight = Math.abs(close - open)
-  
-  // Colors
-  const candleColor = isBullish ? '#10B981' : '#EF4444'
-  const wickColor = isBullish ? '#10B981' : '#EF4444'
-  
-  // Calculate positions relative to chart coordinates
-  const maxValue = Math.max(high, low, open, close)
-  
-  return (
-    <g>
-      {/* Top wick */}
-      <line
-        x1={x + width / 2}
-        y1={y + (high - maxValue)}
-        x2={x + width / 2}
-        y2={y + (candleTop - maxValue)}
-        stroke={wickColor}
-        strokeWidth={1}
-      />
-      
-      {/* Candle body */}
-      <rect
-        x={x + width * 0.25}
-        y={y + (candleTop - maxValue)}
-        width={width * 0.5}
-        height={Math.max(candleHeight, 1)}
-        fill={candleColor}
-        stroke={candleColor}
-      />
-      
-      {/* Bottom wick */}
-      <line
-        x1={x + width / 2}
-        y1={y + (candleBottom - maxValue)}
-        x2={x + width / 2}
-        y2={y + (low - maxValue)}
-        stroke={wickColor}
-        strokeWidth={1}
-      />
-    </g>
-  )
+// Type for the candlestick data
+interface CandlestickData {
+  time: Time
+  open: number
+  high: number
+  low: number
+  close: number
 }
 
 export default function PriceChart({ trades, market, loading, error }: PriceChartProps) {
-  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(TIMEFRAMES[0])
+  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(TIMEFRAMES[2]) // Default to 15m
   const [showTimeframeDropdown, setShowTimeframeDropdown] = useState(false)
+  const chartContainerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
 
-  // Process trades into candlestick data based on selected timeframe
-  const candlestickData = useMemo((): CandlestickData[] => {
+  // Get the latest trade for current price display
+  const latestTrade = useMemo(() => {
+    return trades[0] || null
+  }, [trades])
+
+  // Process trades into candlestick data - SHOW ALL CANDLES BUT LIMIT TO REASONABLE AMOUNT
+  const candlestickData = useMemo(() => {
     if (!market || trades.length === 0) return []
     
     // Group trades into intervals based on selected timeframe
     const interval = selectedTimeframe.value
-    const groupedTrades: { [key: number]: FormattedTrade[] } = {}
+    const groupedTrades: { [key: string]: FormattedTrade[] } = {}
     
     // Sort trades by timestamp (oldest first)
     const sortedTrades = [...trades].sort((a, b) => a.timestamp - b.timestamp)
     
     sortedTrades.forEach(trade => {
       const intervalStart = Math.floor(trade.timestamp / interval) * interval
+      const intervalKey = intervalStart.toString()
       
-      if (!groupedTrades[intervalStart]) {
-        groupedTrades[intervalStart] = []
+      if (!groupedTrades[intervalKey]) {
+        groupedTrades[intervalKey] = []
       }
       
-      groupedTrades[intervalStart].push(trade)
+      groupedTrades[intervalKey].push(trade)
     })
     
     // Convert grouped trades to candlestick data
     const candlesticks: CandlestickData[] = []
     
-    Object.keys(groupedTrades).sort().forEach(intervalStartStr => {
-      const intervalStart = parseInt(intervalStartStr)
-      const intervalTrades = groupedTrades[intervalStart]
+    // Get sorted interval keys
+    const sortedIntervalKeys = Object.keys(groupedTrades).sort((a, b) => parseInt(a) - parseInt(b))
+    
+    sortedIntervalKeys.forEach((intervalKey) => {
+      const intervalStart = parseInt(intervalKey)
+      const intervalTrades = groupedTrades[intervalKey]
       
       if (intervalTrades.length === 0) return
       
-      // Convert all prices for this interval
+      // Convert all prices for this interval using the same logic as PriceWidget
       const prices = intervalTrades.map(trade => 
         convertPriceFromApi(trade.price, market.baseDenom, market.quoteDenom)
       ).filter(price => !isNaN(price) && price > 0)
@@ -206,81 +94,255 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
       const close = prices[prices.length - 1]
       const high = Math.max(...prices)
       const low = Math.min(...prices)
-      const volume = intervalTrades.reduce((sum, trade) => 
-        sum + convertPriceFromApi(trade.quantity, market.baseDenom, ''), 0
-      )
       
-      // Format time label based on timeframe
-      let timeLabel = ''
-      const date = new Date(intervalStart)
-      
-      switch (selectedTimeframe.value) {
-        case TIMEFRAMES[0].value: // 1m
-          timeLabel = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          break
-        case TIMEFRAMES[1].value: // 5m
-          timeLabel = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          break
-        case TIMEFRAMES[2].value: // 15m
-          timeLabel = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          break
-        case TIMEFRAMES[3].value: // 1H
-          timeLabel = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          break
-        case TIMEFRAMES[4].value: // 4H
-          timeLabel = date.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit' })
-          break
-        case TIMEFRAMES[5].value: // 1D
-          timeLabel = date.toLocaleDateString([], { month: 'short', day: 'numeric' })
-          break
-        default:
-          timeLabel = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      }
+      // Use the interval start as time (in seconds)
+      const timeInSeconds = Math.floor(intervalStart / 1000)
       
       candlesticks.push({
-        time: timeLabel,
+        time: timeInSeconds as Time,
         open,
         high,
         low,
         close,
-        volume,
-        timestamp: intervalStart,
-        isBullish: close >= open
       })
     })
     
-    // Return last 30 candlesticks (more for longer timeframes)
-    const maxCandles = selectedTimeframe.value >= TIMEFRAMES[4].value ? 20 : 30
-    return candlesticks.slice(-maxCandles)
+    // Debug: Check for duplicate timestamps
+    const timestamps = candlesticks.map(c => c.time as number)
+    const uniqueTimestamps = new Set(timestamps)
+    if (timestamps.length !== uniqueTimestamps.size) {
+      // Make timestamps unique by adding 1 second increments for duplicates
+      const seen = new Set()
+      const uniqueCandlesticks = candlesticks.map((candle) => {
+        let time = candle.time as number
+        while (seen.has(time)) {
+          time += 1 // Add 1 second if duplicate
+        }
+        seen.add(time)
+        return { ...candle, time: time as Time }
+      })
+      return uniqueCandlesticks.slice(-200) // Increased from 100 to 200
+    }
+    
+    return candlesticks.slice(-200) // Increased from 100 to 200
   }, [trades, market, selectedTimeframe])
 
-  // Get price range for Y-axis
-  const priceRange = useMemo(() => {
-    if (candlestickData.length === 0) return { min: 0, max: 0 }
-    
-    const allPrices = candlestickData.flatMap(c => [c.low, c.high, c.open, c.close])
-    const min = Math.min(...allPrices)
-    const max = Math.max(...allPrices)
-    
-    // Add some padding
-    const padding = (max - min) * 0.05
-    
-    return {
-      min: min - padding,
-      max: max + padding
+  // Initialize chart - WITH TIMEFRAME DEPENDENCY
+  useEffect(() => {
+    if (!chartContainerRef.current) return
+
+    // Clear previous chart if exists
+    if (chartRef.current) {
+      chartRef.current.remove()
+      chartRef.current = null
+      seriesRef.current = null
     }
-  }, [candlestickData])
 
-  // Calculate current price from latest trade
-  const currentPrice = candlestickData[candlestickData.length - 1]?.close || 0
-  const previousPrice = candlestickData[candlestickData.length - 2]?.close || currentPrice
-  const priceChange = currentPrice - previousPrice
-  const priceChangePercent = previousPrice > 0 ? (priceChange / previousPrice) * 100 : 0
+    const chart = createChart(chartContainerRef.current, {
+      layout: {
+        background: { type: ColorType.Solid, color: '#1F2937' },
+        textColor: '#9CA3AF',
+      },
+      grid: {
+        vertLines: { color: '#374151', visible: true },
+        horzLines: { color: '#374151', visible: true },
+      },
+      width: chartContainerRef.current.clientWidth,
+      height: 300,
+      rightPriceScale: {
+        borderColor: '#374151',
+        scaleMargins: {
+          top: 0.1,
+          bottom: 0.1,
+        },
+        minimumWidth: 80,
+        autoScale: true,
+      },
+      timeScale: {
+        borderColor: '#374151',
+        timeVisible: true,
+        secondsVisible: false,
+        barSpacing: 8, // Slightly wider for better visibility
+        minBarSpacing: 2,
+        rightOffset: 5,
+        fixLeftEdge: false,
+        fixRightEdge: false,
+        visible: true,
+        ticksVisible: true,
+      },
+      crosshair: {
+        vertLine: {
+          color: '#6B7280',
+          width: 1,
+          style: 2,
+          visible: true,
+          labelVisible: false,
+        },
+        horzLine: {
+          color: '#6B7280',
+          width: 1,
+          style: 2,
+          visible: true,
+          labelVisible: false,
+        },
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
+      },
+    })
 
-  // Handle timeframe change
+    // Create candlestick series with proper price formatting
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#10B981',
+      downColor: '#EF4444',
+      borderUpColor: '#10B981',
+      borderDownColor: '#EF4444',
+      wickUpColor: '#10B981',
+      wickDownColor: '#EF4444',
+      priceLineVisible: false,
+      priceFormat: {
+        type: 'price',
+        precision: 3,
+        minMove: 0.001,
+      },
+    })
+
+    chartRef.current = chart
+    seriesRef.current = candleSeries
+
+    // Handle resize
+    const handleResize = () => {
+      if (chartContainerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+        })
+      }
+    }
+
+    window.addEventListener('resize', handleResize)
+
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      if (chartRef.current) {
+        chartRef.current.remove()
+        chartRef.current = null
+        seriesRef.current = null
+      }
+    }
+  }, []) // Keep empty dependencies - chart should initialize once
+
+  // Update chart data when candlestickData or timeframe changes
+  useEffect(() => {
+    if (seriesRef.current && candlestickData.length > 0) {
+      try {
+        // Clear existing data and set new data
+        seriesRef.current.setData(candlestickData)
+        
+        // Fit content to show all candles
+        if (chartRef.current) {
+          chartRef.current.timeScale().fitContent()
+          
+          // Add a small timeout to ensure chart is properly rendered
+          setTimeout(() => {
+            if (chartRef.current) {
+              chartRef.current.timeScale().fitContent()
+            }
+          }, 50)
+        }
+      } catch (error) {
+        console.error('Error setting chart data:', error)
+      }
+    }
+  }, [candlestickData]) // Only depend on candlestickData
+
+  // Calculate statistics
+  const stats = useMemo(() => {
+    if (candlestickData.length === 0 || !market || !latestTrade) {
+      return {
+        currentPrice: '0',
+        priceChange: 0,
+        priceChangePercent: 0,
+        periodHigh: '0',
+        periodLow: '0',
+        bullishCount: 0,
+        bearishCount: 0
+      }
+    }
+
+    const currentPrice = candlestickData[candlestickData.length - 1]?.close || 0
+    const previousPrice = candlestickData[candlestickData.length - 2]?.close || currentPrice
+    const priceChange = currentPrice - previousPrice
+    const priceChangePercent = previousPrice > 0 ? (priceChange / previousPrice) * 100 : 0
+    
+    // Get tick size from market
+    const tickSize = market?.minPriceTickSize || 0.0001
+    
+    // Format current price using the same logic as PriceWidget
+    const formattedCurrentPrice = formatPrice(
+      latestTrade.price,
+      tickSize,
+      market.baseDenom,
+      market.quoteDenom
+    )
+    
+    const periodHigh = Math.max(...candlestickData.map(c => c.high))
+    const periodLow = Math.min(...candlestickData.map(c => c.low))
+    
+    // Format high/low prices
+    let formattedPeriodHigh = periodHigh.toFixed(3)
+    let formattedPeriodLow = periodLow.toFixed(3)
+    
+    if (periodHigh < 0.0001) {
+      formattedPeriodHigh = periodHigh.toFixed(6)
+    } else if (periodHigh < 1) {
+      formattedPeriodHigh = periodHigh.toFixed(4)
+    } else if (periodHigh < 1000) {
+      formattedPeriodHigh = periodHigh.toFixed(3)
+    } else if (periodHigh < 10000) {
+      formattedPeriodHigh = periodHigh.toFixed(2)
+    } else {
+      formattedPeriodHigh = periodHigh.toFixed(1)
+    }
+    
+    if (periodLow < 0.0001) {
+      formattedPeriodLow = periodLow.toFixed(6)
+    } else if (periodLow < 1) {
+      formattedPeriodLow = periodLow.toFixed(4)
+    } else if (periodLow < 1000) {
+      formattedPeriodLow = periodLow.toFixed(3)
+    } else if (periodLow < 10000) {
+      formattedPeriodLow = periodLow.toFixed(2)
+    } else {
+      formattedPeriodLow = periodLow.toFixed(1)
+    }
+    
+    const bullishCount = candlestickData.filter(c => c.close >= c.open).length
+    const bearishCount = candlestickData.length - bullishCount
+
+    return {
+      currentPrice: formattedCurrentPrice,
+      priceChange,
+      priceChangePercent,
+      periodHigh: formattedPeriodHigh,
+      periodLow: formattedPeriodLow,
+      bullishCount,
+      bearishCount
+    }
+  }, [candlestickData, market, latestTrade])
+
+  // Handle timeframe change - SIMPLIFIED
   const handleTimeframeChange = useCallback((timeframe: Timeframe) => {
     setSelectedTimeframe(timeframe)
     setShowTimeframeDropdown(false)
+    // Chart will re-render automatically because candlestickData depends on selectedTimeframe
   }, [])
 
   // Close dropdown when clicking outside
@@ -321,7 +383,7 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
             </svg>
           </div>
           <h3 className="text-lg font-semibold text-gray-300 mb-2">Price Chart</h3>
-          <p className="text-gray-500">Collecting trade data for candlesticks...</p>
+          <p className="text-gray-500">Collecting trade data for chart...</p>
           <p className="text-sm text-gray-600 mt-2">Need more trades to generate chart</p>
         </div>
       </div>
@@ -332,7 +394,7 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
     <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 animate-fadeIn">
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h3 className="text-lg font-semibold text-gray-300">Candlestick Chart</h3>
+          <h3 className="text-lg font-semibold text-gray-300">Price Chart</h3>
           <p className="text-sm text-gray-400">
             {market.ticker} • {selectedTimeframe.interval} intervals • {candlestickData.length} candles
           </p>
@@ -379,67 +441,29 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
           {/* Current Price */}
           <div className="text-right">
             <div className="text-sm text-gray-400">Current Price</div>
-            <div className={`text-xl font-bold ${currentPrice >= previousPrice ? 'text-green-400' : 'text-red-400'}`}>
-              {currentPrice.toFixed(6)}
+            <div className={`text-xl font-bold ${stats.priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {stats.currentPrice}
             </div>
-            <div className={`text-sm font-semibold ${priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(6)} 
+            <div className={`text-sm font-semibold ${stats.priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {stats.priceChange >= 0 ? '+' : ''}{stats.priceChange.toFixed(3)} 
               <span className="ml-2">
-                ({priceChange >= 0 ? '+' : ''}{priceChangePercent.toFixed(2)}%)
+                ({stats.priceChange >= 0 ? '+' : ''}{stats.priceChangePercent.toFixed(2)}%)
               </span>
             </div>
           </div>
         </div>
       </div>
       
-      <div className="h-64">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
-            data={candlestickData}
-            margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-          >
-            <CartesianGrid 
-              strokeDasharray="3 3" 
-              stroke="#374151" 
-              horizontal={true}
-              vertical={false}
-            />
-            <ReferenceLine 
-              y={currentPrice} 
-              stroke="#6B7280" 
-              strokeDasharray="3 3" 
-              strokeWidth={1}
-            />
-            <XAxis 
-              dataKey="time" 
-              stroke="#9CA3AF"
-              fontSize={11}
-              tickLine={false}
-              axisLine={{ stroke: '#374151' }}
-              tick={{ fill: '#9CA3AF' }}
-              minTickGap={15}
-            />
-            <YAxis 
-              stroke="#9CA3AF"
-              fontSize={11}
-              tickLine={false}
-              axisLine={{ stroke: '#374151' }}
-              tick={{ fill: '#9CA3AF' }}
-              domain={[priceRange.min, priceRange.max]}
-              tickFormatter={(value) => value.toFixed(4)}
-              width={70}
-              orientation="right"
-            />
-            <Tooltip content={<CandlestickTooltip />} />
-            
-            {/* Candlestick bars */}
-            <Bar
-              dataKey="high"
-              shape={(props: any) => <CandlestickBar {...props} />}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
+      {/* Chart Container */}
+      <div 
+        ref={chartContainerRef} 
+        className="h-64 rounded-lg overflow-hidden bg-gray-900/30"
+        style={{ 
+          minHeight: '256px',
+          position: 'relative',
+          zIndex: 1
+        }}
+      />
       
       {/* Chart Stats */}
       <div className="mt-4 pt-4 border-t border-gray-700/50">
@@ -447,25 +471,25 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
           <div>
             <div className="text-gray-400">Period High</div>
             <div className="text-green-400 font-semibold">
-              {Math.max(...candlestickData.map(c => c.high)).toFixed(6)}
+              {stats.periodHigh}
             </div>
           </div>
           <div>
             <div className="text-gray-400">Period Low</div>
             <div className="text-red-400 font-semibold">
-              {Math.min(...candlestickData.map(c => c.low)).toFixed(6)}
+              {stats.periodLow}
             </div>
           </div>
           <div>
             <div className="text-gray-400">Bullish</div>
             <div className="text-green-400 font-semibold">
-              {candlestickData.filter(c => c.isBullish).length}
+              {stats.bullishCount}
             </div>
           </div>
           <div>
             <div className="text-gray-400">Bearish</div>
             <div className="text-red-400 font-semibold">
-              {candlestickData.filter(c => !c.isBullish).length}
+              {stats.bearishCount}
             </div>
           </div>
         </div>
