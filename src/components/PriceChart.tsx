@@ -1,12 +1,13 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickSeries, Time } from 'lightweight-charts'
 import { FormattedTrade } from '../api/injectiveClient'
-import { Market } from '../types'
+import { Market, Orderbook } from '../types'
 import { convertPriceFromApi, formatPrice } from '../utils/format'
 import Loader from './Loader'
 
 interface PriceChartProps {
   trades: FormattedTrade[]
+  orderbook: Orderbook
   market: Market | null
   loading: boolean
   error: string | null
@@ -14,11 +15,18 @@ interface PriceChartProps {
 
 interface Timeframe {
   label: string
-  value: number // milliseconds
+  value: number
   interval: string
 }
 
-// Available timeframes
+interface CandlestickData {
+  time: Time
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
 const TIMEFRAMES: Timeframe[] = [
   { label: '1m', value: 60 * 1000, interval: '1 minute' },
   { label: '5m', value: 5 * 60 * 1000, interval: '5 minutes' },
@@ -28,115 +36,251 @@ const TIMEFRAMES: Timeframe[] = [
   { label: '1D', value: 24 * 60 * 60 * 1000, interval: '1 day' },
 ]
 
-// Type for the candlestick data
-interface CandlestickData {
-  time: Time
-  open: number
-  high: number
-  low: number
-  close: number
-}
-
-export default function PriceChart({ trades, market, loading, error }: PriceChartProps) {
-  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(TIMEFRAMES[2]) // Default to 15m
+export default function PriceChart({ trades, orderbook, market, loading, error }: PriceChartProps) {
+  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(TIMEFRAMES[2])
   const [showTimeframeDropdown, setShowTimeframeDropdown] = useState(false)
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const isChartInitializedRef = useRef(false)
 
-  // Get the latest trade for current price display
-  const latestTrade = useMemo(() => {
-    return trades[0] || null
-  }, [trades])
+  // Calculate current market price from orderbook
+  const currentMarketPrice = useMemo(() => {
+    if (!orderbook || !orderbook.bids || !orderbook.asks) return '0'
+    
+    const bestBid = orderbook.bids[0]
+    const bestAsk = orderbook.asks[0]
+    
+    if (!bestBid && !bestAsk) return '0'
+    
+    if (bestBid && bestAsk) {
+      const bidPrice = parseFloat(bestBid.price)
+      const askPrice = parseFloat(bestAsk.price)
+      if (!isNaN(bidPrice) && !isNaN(askPrice)) {
+        return ((bidPrice + askPrice) / 2).toString()
+      }
+    }
+    
+    if (bestBid) return bestBid.price
+    if (bestAsk) return bestAsk.price
+    
+    return '0'
+  }, [orderbook])
 
-  // Process trades into candlestick data - SHOW ALL CANDLES BUT LIMIT TO REASONABLE AMOUNT
+  // Get formatted current price for display
+  const formattedCurrentPrice = useMemo(() => {
+    if (!market || currentMarketPrice === '0') return '0'
+    
+    const tickSize = market.minPriceTickSize || 0.0001
+    return formatPrice(currentMarketPrice, tickSize, market.baseDenom, market.quoteDenom)
+  }, [currentMarketPrice, market])
+
+  // Process trades into candlestick data - IMPROVED VERSION
   const candlestickData = useMemo(() => {
-    if (!market || trades.length === 0) return []
+    if (!market || trades.length === 0) {
+      console.log('No market or trades for chart')
+      return []
+    }
     
-    // Group trades into intervals based on selected timeframe
+    console.log(`Processing ${trades.length} trades for chart`)
+    
     const interval = selectedTimeframe.value
-    const groupedTrades: { [key: string]: FormattedTrade[] } = {}
-    
     // Sort trades by timestamp (oldest first)
     const sortedTrades = [...trades].sort((a, b) => a.timestamp - b.timestamp)
     
-    sortedTrades.forEach(trade => {
-      const intervalStart = Math.floor(trade.timestamp / interval) * interval
-      const intervalKey = intervalStart.toString()
-      
-      if (!groupedTrades[intervalKey]) {
-        groupedTrades[intervalKey] = []
-      }
-      
-      groupedTrades[intervalKey].push(trade)
+    if (sortedTrades.length === 0) return []
+    
+    // Find the time range of all trades
+    const firstTradeTime = sortedTrades[0].timestamp
+    const lastTradeTime = sortedTrades[sortedTrades.length - 1].timestamp
+    const timeRange = lastTradeTime - firstTradeTime
+    
+    console.log(`Time range: ${timeRange / 1000} seconds, ${timeRange / (60 * 1000)} minutes`)
+    
+    // If we have very few trades relative to the timeframe, use a smaller timeframe
+    let effectiveInterval = interval
+    if (sortedTrades.length < 10 && timeRange < interval) {
+      // Use 1/4 of the selected interval or 1 minute, whichever is larger
+      effectiveInterval = Math.max(60 * 1000, Math.floor(interval / 4))
+      console.log(`Few trades detected. Using smaller interval: ${effectiveInterval / 1000} seconds`)
+    }
+    
+    // Group trades by timeframe
+    const groupedTrades = new Map<number, FormattedTrade[]>()
+    
+    sortedTrades.forEach((trade, index) => {
+      const intervalStart = Math.floor(trade.timestamp / effectiveInterval) * effectiveInterval
+      const tradesInInterval = groupedTrades.get(intervalStart) || []
+      tradesInInterval.push(trade)
+      groupedTrades.set(intervalStart, tradesInInterval)
     })
     
-    // Convert grouped trades to candlestick data
+    console.log(`Grouped into ${groupedTrades.size} intervals`)
+    
+    // Convert to candlestick data
     const candlesticks: CandlestickData[] = []
+    const intervalStarts = Array.from(groupedTrades.keys()).sort((a, b) => a - b)
     
-    // Get sorted interval keys
-    const sortedIntervalKeys = Object.keys(groupedTrades).sort((a, b) => parseInt(a) - parseInt(b))
-    
-    sortedIntervalKeys.forEach((intervalKey) => {
-      const intervalStart = parseInt(intervalKey)
-      const intervalTrades = groupedTrades[intervalKey]
+    for (let i = 0; i < intervalStarts.length; i++) {
+      const intervalStart = intervalStarts[i]
+      const intervalTrades = groupedTrades.get(intervalStart) || []
       
-      if (intervalTrades.length === 0) return
+      if (intervalTrades.length === 0) continue
       
-      // Convert all prices for this interval using the same logic as PriceWidget
-      const prices = intervalTrades.map(trade => 
-        convertPriceFromApi(trade.price, market.baseDenom, market.quoteDenom)
-      ).filter(price => !isNaN(price) && price > 0)
+      // Convert prices
+      const prices = intervalTrades
+        .map(trade => {
+          const convertedPrice = convertPriceFromApi(trade.price, market.baseDenom, market.quoteDenom)
+          return convertedPrice
+        })
+        .filter(price => !isNaN(price) && price > 0)
       
-      if (prices.length === 0) return
+      if (prices.length === 0) continue
       
       const open = prices[0]
       const close = prices[prices.length - 1]
       const high = Math.max(...prices)
       const low = Math.min(...prices)
       
-      // Use the interval start as time (in seconds)
-      const timeInSeconds = Math.floor(intervalStart / 1000)
-      
       candlesticks.push({
-        time: timeInSeconds as Time,
+        time: Math.floor(intervalStart / 1000) as Time,
         open,
         high,
         low,
         close,
       })
-    })
-    
-    // Debug: Check for duplicate timestamps
-    const timestamps = candlesticks.map(c => c.time as number)
-    const uniqueTimestamps = new Set(timestamps)
-    if (timestamps.length !== uniqueTimestamps.size) {
-      // Make timestamps unique by adding 1 second increments for duplicates
-      const seen = new Set()
-      const uniqueCandlesticks = candlesticks.map((candle) => {
-        let time = candle.time as number
-        while (seen.has(time)) {
-          time += 1 // Add 1 second if duplicate
-        }
-        seen.add(time)
-        return { ...candle, time: time as Time }
-      })
-      return uniqueCandlesticks.slice(-200) // Increased from 100 to 200
     }
     
-    return candlesticks.slice(-200) // Increased from 100 to 200
+    console.log(`Generated ${candlesticks.length} candles`)
+    
+    // If we have very few candles, try to create more by analyzing price patterns
+    if (candlesticks.length < 10 && sortedTrades.length > 5) {
+      console.log('Creating additional candles from price patterns...')
+      
+      // Create synthetic candles by analyzing price changes between trades
+      const syntheticCandles: CandlestickData[] = []
+      const tradesPerCandle = Math.max(2, Math.floor(sortedTrades.length / 10))
+      
+      for (let i = 0; i < sortedTrades.length; i += tradesPerCandle) {
+        const tradeGroup = sortedTrades.slice(i, i + tradesPerCandle)
+        if (tradeGroup.length === 0) continue
+        
+        const prices = tradeGroup
+          .map(trade => convertPriceFromApi(trade.price, market.baseDenom, market.quoteDenom))
+          .filter(price => !isNaN(price) && price > 0)
+        
+        if (prices.length === 0) continue
+        
+        const open = prices[0]
+        const close = prices[prices.length - 1]
+        const high = Math.max(...prices)
+        const low = Math.min(...prices)
+        
+        // Use the timestamp of the first trade in the group
+        const candleTime = Math.floor(tradeGroup[0].timestamp / 1000) as Time
+        
+        syntheticCandles.push({
+          time: candleTime,
+          open,
+          high,
+          low,
+          close,
+        })
+      }
+      
+      // Combine with original candles and sort by time
+      const allCandles = [...candlesticks, ...syntheticCandles]
+        .sort((a, b) => (a.time as number) - (b.time as number))
+        .slice(-50) // Take last 50 candles max
+      
+      console.log(`Added synthetic candles. Total: ${allCandles.length}`)
+      return allCandles
+    }
+    
+    return candlesticks.slice(-50) // Return last 50 candles max
   }, [trades, market, selectedTimeframe])
 
-  // Initialize chart - WITH TIMEFRAME DEPENDENCY
+  // Calculate statistics
+  const stats = useMemo(() => {
+    if (candlestickData.length === 0 || !market) {
+      return {
+        currentPrice: '0',
+        priceChange: 0,
+        priceChangePercent: 0,
+        periodHigh: '0',
+        periodLow: '0',
+        volume24h: '0',
+        bullishCount: 0,
+        bearishCount: 0
+      }
+    }
+
+    // Get current price number for calculations
+    let currentPriceNum = 0
+    let priceChange = 0
+    let priceChangePercent = 0
+    
+    if (currentMarketPrice !== '0') {
+      currentPriceNum = parseFloat(currentMarketPrice) || 0
+    } else if (candlestickData.length > 0) {
+      currentPriceNum = candlestickData[candlestickData.length - 1]?.close || 0
+    }
+    
+    // Calculate price change from previous candle
+    if (candlestickData.length >= 2) {
+      const previousPrice = candlestickData[candlestickData.length - 2]?.close || currentPriceNum
+      priceChange = currentPriceNum - previousPrice
+      priceChangePercent = previousPrice > 0 ? (priceChange / previousPrice) * 100 : 0
+    }
+    
+    // Get period high/low
+    const periodHigh = Math.max(...candlestickData.map(c => c.high))
+    const periodLow = Math.min(...candlestickData.map(c => c.low))
+    
+    // Calculate 24h volume
+    const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000
+    const recentTrades = trades.filter(t => t.timestamp > twentyFourHoursAgo)
+    const volume24h = recentTrades.reduce((sum, trade) => {
+      const price = convertPriceFromApi(trade.price, market.baseDenom, market.quoteDenom)
+      const quantity = parseFloat(trade.quantity) || 0
+      return sum + (price * quantity)
+    }, 0)
+    
+    const bullishCount = candlestickData.filter(c => c.close >= c.open).length
+    const bearishCount = candlestickData.length - bullishCount
+
+    return {
+      currentPrice: formattedCurrentPrice,
+      priceChange,
+      priceChangePercent,
+      periodHigh: periodHigh.toFixed(4),
+      periodLow: periodLow.toFixed(4),
+      volume24h: volume24h.toFixed(2),
+      bullishCount,
+      bearishCount
+    }
+  }, [candlestickData, market, currentMarketPrice, trades, formattedCurrentPrice])
+
+  // Initialize chart
   useEffect(() => {
-    if (!chartContainerRef.current) return
+    if (!chartContainerRef.current || !market || isChartInitializedRef.current) {
+      return
+    }
 
     // Clear previous chart if exists
-    if (chartRef.current) {
-      chartRef.current.remove()
-      chartRef.current = null
-      seriesRef.current = null
+    const cleanupChart = () => {
+      if (chartRef.current) {
+        try {
+          chartRef.current.remove()
+        } catch (error) {
+          // Ignore "Object is disposed" errors
+        }
+        chartRef.current = null
+        seriesRef.current = null
+      }
     }
+
+    cleanupChart()
 
     const chart = createChart(chartContainerRef.current, {
       layout: {
@@ -151,55 +295,22 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
       height: 300,
       rightPriceScale: {
         borderColor: '#374151',
-        scaleMargins: {
-          top: 0.1,
-          bottom: 0.1,
-        },
-        minimumWidth: 80,
+        scaleMargins: { top: 0.05, bottom: 0.05 }, // Adjusted for better visibility
         autoScale: true,
       },
       timeScale: {
         borderColor: '#374151',
         timeVisible: true,
         secondsVisible: false,
-        barSpacing: 8, // Slightly wider for better visibility
-        minBarSpacing: 2,
-        rightOffset: 5,
-        fixLeftEdge: false,
-        fixRightEdge: false,
-        visible: true,
-        ticksVisible: true,
+        barSpacing: 12, // Increased for better visibility
+        minBarSpacing: 6,
       },
       crosshair: {
-        vertLine: {
-          color: '#6B7280',
-          width: 1,
-          style: 2,
-          visible: true,
-          labelVisible: false,
-        },
-        horzLine: {
-          color: '#6B7280',
-          width: 1,
-          style: 2,
-          visible: true,
-          labelVisible: false,
-        },
-      },
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-        horzTouchDrag: true,
-        vertTouchDrag: true,
-      },
-      handleScale: {
-        axisPressedMouseMove: true,
-        mouseWheel: true,
-        pinch: true,
-      },
+        vertLine: { color: '#6B7280', width: 1, style: 2 },
+        horzLine: { color: '#6B7280', width: 1, style: 2 },
+      }
     })
 
-    // Create candlestick series with proper price formatting
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#10B981',
       downColor: '#EF4444',
@@ -207,155 +318,117 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
       borderDownColor: '#EF4444',
       wickUpColor: '#10B981',
       wickDownColor: '#EF4444',
-      priceLineVisible: false,
-      priceFormat: {
-        type: 'price',
-        precision: 3,
-        minMove: 0.001,
+      priceFormat: { 
+        type: 'price', 
+        precision: 6,
+        minMove: 0.000001 
       },
     })
 
     chartRef.current = chart
     seriesRef.current = candleSeries
+    isChartInitializedRef.current = true
 
-    // Handle resize
     const handleResize = () => {
       if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-        })
+        try {
+          chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth })
+        } catch (error) {
+          // Ignore resize errors
+        }
       }
     }
 
     window.addEventListener('resize', handleResize)
-
+    
     return () => {
       window.removeEventListener('resize', handleResize)
-      if (chartRef.current) {
-        chartRef.current.remove()
-        chartRef.current = null
-        seriesRef.current = null
-      }
+      cleanupChart()
+      isChartInitializedRef.current = false
     }
-  }, []) // Keep empty dependencies - chart should initialize once
+  }, [market])
 
-  // Update chart data when candlestickData or timeframe changes
+  // Update chart data
   useEffect(() => {
-    if (seriesRef.current && candlestickData.length > 0) {
-      try {
-        // Clear existing data and set new data
-        seriesRef.current.setData(candlestickData)
+    if (!seriesRef.current || !chartRef.current || candlestickData.length === 0) {
+      return
+    }
+
+    try {
+      seriesRef.current.setData(candlestickData)
+      
+      // Fit content and set visible range
+      chartRef.current.timeScale().fitContent()
+      
+      // Show more candles if we have few
+      if (candlestickData.length < 20) {
+        // Show all candles with some padding
+        const barSpacing = 12
+        const width = chartContainerRef.current?.clientWidth || 800
+        const visibleBars = Math.floor(width / barSpacing)
         
-        // Fit content to show all candles
-        if (chartRef.current) {
-          chartRef.current.timeScale().fitContent()
-          
-          // Add a small timeout to ensure chart is properly rendered
-          setTimeout(() => {
-            if (chartRef.current) {
-              chartRef.current.timeScale().fitContent()
-            }
-          }, 50)
+        const lastCandleIndex = candlestickData.length - 1
+        const firstVisibleIndex = Math.max(0, lastCandleIndex - visibleBars + 3)
+        
+        if (candlestickData.length > 0) {
+          chartRef.current.timeScale().setVisibleRange({
+            from: candlestickData[firstVisibleIndex].time,
+            to: candlestickData[lastCandleIndex].time
+          })
         }
-      } catch (error) {
-        console.error('Error setting chart data:', error)
       }
+    } catch (error) {
+      console.log('Chart update error:', error)
     }
-  }, [candlestickData]) // Only depend on candlestickData
+  }, [candlestickData])
 
-  // Calculate statistics
-  const stats = useMemo(() => {
-    if (candlestickData.length === 0 || !market || !latestTrade) {
-      return {
-        currentPrice: '0',
-        priceChange: 0,
-        priceChangePercent: 0,
-        periodHigh: '0',
-        periodLow: '0',
-        bullishCount: 0,
-        bearishCount: 0
-      }
-    }
-
-    const currentPrice = candlestickData[candlestickData.length - 1]?.close || 0
-    const previousPrice = candlestickData[candlestickData.length - 2]?.close || currentPrice
-    const priceChange = currentPrice - previousPrice
-    const priceChangePercent = previousPrice > 0 ? (priceChange / previousPrice) * 100 : 0
-    
-    // Get tick size from market
-    const tickSize = market?.minPriceTickSize || 0.0001
-    
-    // Format current price using the same logic as PriceWidget
-    const formattedCurrentPrice = formatPrice(
-      latestTrade.price,
-      tickSize,
-      market.baseDenom,
-      market.quoteDenom
-    )
-    
-    const periodHigh = Math.max(...candlestickData.map(c => c.high))
-    const periodLow = Math.min(...candlestickData.map(c => c.low))
-    
-    // Format high/low prices
-    let formattedPeriodHigh = periodHigh.toFixed(3)
-    let formattedPeriodLow = periodLow.toFixed(3)
-    
-    if (periodHigh < 0.0001) {
-      formattedPeriodHigh = periodHigh.toFixed(6)
-    } else if (periodHigh < 1) {
-      formattedPeriodHigh = periodHigh.toFixed(4)
-    } else if (periodHigh < 1000) {
-      formattedPeriodHigh = periodHigh.toFixed(3)
-    } else if (periodHigh < 10000) {
-      formattedPeriodHigh = periodHigh.toFixed(2)
-    } else {
-      formattedPeriodHigh = periodHigh.toFixed(1)
-    }
-    
-    if (periodLow < 0.0001) {
-      formattedPeriodLow = periodLow.toFixed(6)
-    } else if (periodLow < 1) {
-      formattedPeriodLow = periodLow.toFixed(4)
-    } else if (periodLow < 1000) {
-      formattedPeriodLow = periodLow.toFixed(3)
-    } else if (periodLow < 10000) {
-      formattedPeriodLow = periodLow.toFixed(2)
-    } else {
-      formattedPeriodLow = periodLow.toFixed(1)
-    }
-    
-    const bullishCount = candlestickData.filter(c => c.close >= c.open).length
-    const bearishCount = candlestickData.length - bullishCount
-
-    return {
-      currentPrice: formattedCurrentPrice,
-      priceChange,
-      priceChangePercent,
-      periodHigh: formattedPeriodHigh,
-      periodLow: formattedPeriodLow,
-      bullishCount,
-      bearishCount
-    }
-  }, [candlestickData, market, latestTrade])
-
-  // Handle timeframe change - SIMPLIFIED
-  const handleTimeframeChange = useCallback((timeframe: Timeframe) => {
+  // Handle timeframe change
+  const handleTimeframeChange = (timeframe: Timeframe) => {
     setSelectedTimeframe(timeframe)
     setShowTimeframeDropdown(false)
-    // Chart will re-render automatically because candlestickData depends on selectedTimeframe
-  }, [])
+  }
 
-  // Close dropdown when clicking outside
+  // Close dropdown on click outside
   useEffect(() => {
     const handleClickOutside = () => {
-      if (showTimeframeDropdown) {
-        setShowTimeframeDropdown(false)
-      }
+      setShowTimeframeDropdown(false)
     }
     
     document.addEventListener('click', handleClickOutside)
     return () => document.removeEventListener('click', handleClickOutside)
-  }, [showTimeframeDropdown])
+  }, [])
+
+  // Reset chart when market changes
+  useEffect(() => {
+    isChartInitializedRef.current = false
+  }, [market?.id])
+
+  // Log data for debugging
+  useEffect(() => {
+    if (trades.length > 0) {
+      console.log('=== CHART DATA DEBUG ===')
+      console.log(`Total trades: ${trades.length}`)
+      console.log(`Selected timeframe: ${selectedTimeframe.label} (${selectedTimeframe.value/1000}s)`)
+      console.log(`Candles generated: ${candlestickData.length}`)
+      
+      if (candlestickData.length > 0) {
+        console.log('Candle sample:')
+        candlestickData.slice(-3).forEach((candle, i) => {
+          console.log(`Candle ${candlestickData.length - 3 + i}:`, {
+            time: new Date((candle.time as number) * 1000).toISOString(),
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            hasBody: candle.open !== candle.close,
+            hasWick: candle.high > Math.max(candle.open, candle.close) || 
+                    candle.low < Math.min(candle.open, candle.close)
+          })
+        })
+      }
+      console.log('=======================')
+    }
+  }, [trades, candlestickData, selectedTimeframe])
 
   if (loading && trades.length === 0) {
     return (
@@ -368,7 +441,7 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
   if (error && trades.length === 0) {
     return (
       <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 h-80 flex items-center justify-center">
-        <p className="text-red-400">Error loading chart data: {error}</p>
+        <p className="text-red-400">Error loading chart: {error}</p>
       </div>
     )
   }
@@ -376,31 +449,31 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
   if (!market || candlestickData.length === 0) {
     return (
       <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 h-80 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-gray-400 mb-4">
-            <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-            </svg>
-          </div>
-          <h3 className="text-lg font-semibold text-gray-300 mb-2">Price Chart</h3>
-          <p className="text-gray-500">Collecting trade data for chart...</p>
-          <p className="text-sm text-gray-600 mt-2">Need more trades to generate chart</p>
+        <div className="text-center text-gray-400">
+          <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <p className="text-gray-500">Chart data loading...</p>
+          <p className="text-sm text-gray-600 mt-1">
+            Trades: {trades.length} • Generating candles...
+          </p>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 animate-fadeIn">
-      <div className="flex justify-between items-center mb-6">
+    <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
         <div>
           <h3 className="text-lg font-semibold text-gray-300">Price Chart</h3>
           <p className="text-sm text-gray-400">
-            {market.ticker} • {selectedTimeframe.interval} intervals • {candlestickData.length} candles
+            {market.ticker} • {candlestickData.length} candles
           </p>
         </div>
         
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center gap-4 w-full sm:w-auto">
           {/* Timeframe Selector */}
           <div className="relative">
             <button
@@ -408,7 +481,7 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
                 e.stopPropagation()
                 setShowTimeframeDropdown(!showTimeframeDropdown)
               }}
-              className="flex items-center justify-between px-3 py-2 bg-gray-900/50 border border-gray-700 rounded-lg hover:bg-gray-800 transition-colors min-w-[80px]"
+              className="flex items-center justify-between px-3 py-2 bg-gray-900/50 border border-gray-700 rounded-lg hover:bg-gray-800 transition-colors w-24"
             >
               <span className="text-gray-300">{selectedTimeframe.label}</span>
               <svg className="w-4 h-4 ml-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -417,7 +490,7 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
             </button>
             
             {showTimeframeDropdown && (
-              <div className="absolute right-0 mt-1 z-20 bg-gray-900 border border-gray-700 rounded-lg shadow-lg min-w-[80px]">
+              <div className="absolute right-0 mt-1 z-20 bg-gray-900 border border-gray-700 rounded-lg shadow-lg w-24">
                 {TIMEFRAMES.map((tf) => (
                   <button
                     key={tf.label}
@@ -425,7 +498,7 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
                       e.stopPropagation()
                       handleTimeframeChange(tf)
                     }}
-                    className={`w-full px-3 py-2 text-left hover:bg-gray-800 transition-colors first:rounded-t-lg last:rounded-b-lg ${
+                    className={`w-full px-3 py-2 text-left hover:bg-gray-800 transition-colors ${
                       selectedTimeframe.label === tf.label 
                         ? 'bg-gray-800 text-blue-400' 
                         : 'text-gray-300'
@@ -439,77 +512,61 @@ export default function PriceChart({ trades, market, loading, error }: PriceChar
           </div>
           
           {/* Current Price */}
-          <div className="text-right">
-            <div className="text-sm text-gray-400">Current Price</div>
+          <div className="text-right flex-1 sm:flex-none">
+            <div className="text-sm text-gray-400">Current</div>
             <div className={`text-xl font-bold ${stats.priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
               {stats.currentPrice}
             </div>
-            <div className={`text-sm font-semibold ${stats.priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {stats.priceChange >= 0 ? '+' : ''}{stats.priceChange.toFixed(3)} 
-              <span className="ml-2">
-                ({stats.priceChange >= 0 ? '+' : ''}{stats.priceChangePercent.toFixed(2)}%)
-              </span>
+            <div className={`text-sm ${stats.priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {stats.priceChange >= 0 ? '+' : ''}{stats.priceChangePercent.toFixed(2)}%
             </div>
           </div>
         </div>
       </div>
       
-      {/* Chart Container */}
+      {/* Chart */}
       <div 
         ref={chartContainerRef} 
         className="h-64 rounded-lg overflow-hidden bg-gray-900/30"
-        style={{ 
-          minHeight: '256px',
-          position: 'relative',
-          zIndex: 1
-        }}
       />
       
-      {/* Chart Stats */}
+      {/* Stats */}
       <div className="mt-4 pt-4 border-t border-gray-700/50">
-        <div className="grid grid-cols-4 gap-4 text-sm">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
           <div>
-            <div className="text-gray-400">Period High</div>
-            <div className="text-green-400 font-semibold">
-              {stats.periodHigh}
-            </div>
+            <div className="text-gray-400">High</div>
+            <div className="text-green-400 font-medium">{stats.periodHigh}</div>
           </div>
           <div>
-            <div className="text-gray-400">Period Low</div>
-            <div className="text-red-400 font-semibold">
-              {stats.periodLow}
-            </div>
+            <div className="text-gray-400">Low</div>
+            <div className="text-red-400 font-medium">{stats.periodLow}</div>
           </div>
           <div>
             <div className="text-gray-400">Bullish</div>
-            <div className="text-green-400 font-semibold">
-              {stats.bullishCount}
-            </div>
+            <div className="text-green-400 font-medium">{stats.bullishCount}</div>
           </div>
           <div>
             <div className="text-gray-400">Bearish</div>
-            <div className="text-red-400 font-semibold">
-              {stats.bearishCount}
-            </div>
+            <div className="text-red-400 font-medium">{stats.bearishCount}</div>
           </div>
         </div>
-      </div>
-      
-      {/* Timeframe Legend */}
-      <div className="mt-4 flex justify-center space-x-2">
-        {TIMEFRAMES.map((tf) => (
-          <button
-            key={tf.label}
-            onClick={() => handleTimeframeChange(tf)}
-            className={`px-3 py-1 text-xs rounded-full transition-colors ${
-              selectedTimeframe.label === tf.label
-                ? 'bg-blue-900/30 text-blue-400 border border-blue-700/50'
-                : 'bg-gray-900/30 text-gray-400 hover:bg-gray-800 border border-gray-700/30'
-            }`}
-          >
-            {tf.label}
-          </button>
-        ))}
+        
+        {/* Timeframe buttons */}
+        <div className="mt-4 flex flex-wrap gap-2 justify-center">
+          {TIMEFRAMES.map((tf) => (
+            <button
+              key={tf.label}
+              onClick={() => handleTimeframeChange(tf)}
+              className={`px-3 py-1 text-xs rounded-full transition-colors ${
+                selectedTimeframe.label === tf.label
+                  ? 'bg-blue-900/30 text-blue-400 border border-blue-700/50'
+                  : 'bg-gray-900/30 text-gray-400 hover:bg-gray-800 border border-gray-700/30'
+              }`}
+            >
+              {tf.label}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   )

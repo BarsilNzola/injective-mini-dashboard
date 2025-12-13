@@ -3,9 +3,7 @@ import {
   IndexerGrpcDerivativesApi,
   SpotMarket,
   DerivativeMarket,
-  SpotTrade,
   DerivativeTrade,
-  TradeDirection,
   PaginationOption,
   IndexerGrpcOracleApi,
   PriceLevel
@@ -99,7 +97,6 @@ class InjectiveClient {
       
       const response = await this.spotApi.fetchTrades({
         marketId,
-        direction: TradeDirection.Sell,
         pagination
       })
   
@@ -158,7 +155,6 @@ class InjectiveClient {
       
       const response = await this.derivativesApi.fetchTrades({
         marketId,
-        direction: TradeDirection.Sell,
         pagination
       })
 

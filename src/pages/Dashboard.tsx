@@ -27,6 +27,27 @@ export default function Dashboard() {
   const { orderbook, loading: orderbookLoading, error: orderbookError } = useOrderbook(selectedMarket?.id || null)
   const { trades, loading: tradesLoading, error: tradesError } = useTrades(selectedMarket?.id || null)
 
+  // Calculate current market price from orderbook
+  const getCurrentMarketPrice = () => {
+    if (!orderbook || orderbook.bids.length === 0 || orderbook.asks.length === 0) {
+      return '0'
+    }
+    
+    const bestBid = parseFloat(orderbook.bids[0]?.price || '0')
+    const bestAsk = parseFloat(orderbook.asks[0]?.price || '0')
+    
+    if (bestBid > 0 && bestAsk > 0) {
+      // Mid price: (best bid + best ask) / 2
+      return ((bestBid + bestAsk) / 2).toString()
+    } else if (bestBid > 0) {
+      return bestBid.toString()
+    } else if (bestAsk > 0) {
+      return bestAsk.toString()
+    }
+    
+    return '0'
+  }
+
   const handleMarketChange = (market: Market) => {
     setSelectedMarket(market)
   }
@@ -49,9 +70,10 @@ export default function Dashboard() {
               <PriceWidget
                 key={`price-${selectedMarket.id}`} // Force re-render on market change
                 trades={trades}
+                orderbook={orderbook} // PASS ORDERBOOK DATA
                 market={selectedMarket}
-                loading={tradesLoading}
-                error={tradesError}
+                loading={tradesLoading || orderbookLoading}
+                error={tradesError || orderbookError}
               />
             </div>
             <div className="lg:col-span-2">
@@ -70,6 +92,7 @@ export default function Dashboard() {
             <PriceChart
               key={`chart-${selectedMarket.id}`} // Force re-render on market change
               trades={trades}
+              orderbook={orderbook} 
               market={selectedMarket}
               loading={tradesLoading}
               error={tradesError}
