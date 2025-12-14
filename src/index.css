@@ -166,3 +166,9 @@ input:focus {
 .recharts-tooltip-wrapper {
   z-index: 1000;
 }
+
+.tv-attr,
+.lightweight-charts-attr,
+[class*="attr"] {
+  display: none !important;
+}
