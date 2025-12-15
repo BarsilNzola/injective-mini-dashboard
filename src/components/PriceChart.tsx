@@ -12,29 +12,12 @@ interface PriceChartProps {
   error: string | null
 }
 
-interface Timeframe {
-  label: string
-  value: number
-  interval: string
-}
-
-const TIMEFRAMES: Timeframe[] = [
-  { label: '1m', value: 60 * 1000, interval: '1 minute' },
-  { label: '5m', value: 5 * 60 * 1000, interval: '5 minutes' },
-  { label: '15m', value: 15 * 60 * 1000, interval: '15 minutes' },
-  { label: '1H', value: 60 * 60 * 1000, interval: '1 hour' },
-  { label: '4H', value: 4 * 60 * 60 * 1000, interval: '4 hours' },
-  { label: '1D', value: 24 * 60 * 60 * 1000, interval: '1 day' },
-]
-
 interface LineData {
   time: Time
   value: number
 }
 
 export default function PriceChart({ orderbook, market, loading, error }: PriceChartProps) {
-  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(TIMEFRAMES[2])
-  const [showTimeframeDropdown, setShowTimeframeDropdown] = useState(false)
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
@@ -119,9 +102,9 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
           
           const updated = [...prev, newPoint]
           
-          // Keep last 100 points for smoother chart
-          if (updated.length > 100) {
-            return updated.slice(-100)
+          // Keep last 300 points (5 minutes at 1-second intervals)
+          if (updated.length > 300) {
+            return updated.slice(-300)
           }
           return updated
         })
@@ -136,7 +119,7 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
     }
   }, [market, getCurrentMarketPrice])
 
-  // Initialize chart with 4 decimal precision
+  // Initialize chart
   useEffect(() => {
     if (!chartContainerRef.current || !market) return
 
@@ -160,22 +143,28 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
         borderVisible: true,
         autoScale: true,
         scaleMargins: {
-          top: 0.05,
-          bottom: 0.05,
+          top: 0.1,
+          bottom: 0.1,
         },
         entireTextOnly: false,
+      },
+      leftPriceScale: {
+        visible: false,
       },
       timeScale: {
         borderColor: '#374151',
         timeVisible: true,
-        secondsVisible: false,
-        tickMarkFormatter: (time: number) => {
-          const date = new Date(time * 1000)
-          return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        },
+        secondsVisible: true,
+        rightBarStaysOnScroll: true,
+        rightOffset: 12,
+        barSpacing: 6,
+        minBarSpacing: 0.5,
+        fixLeftEdge: true,
+        fixRightEdge: false,
+        lockVisibleTimeRangeOnResize: true,
         visible: true,
         borderVisible: true,
-        rightOffset: 10,
+        ticksVisible: true,
       },
       crosshair: {
         vertLine: {
@@ -192,6 +181,7 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
           visible: true,
           labelVisible: true,
         },
+        mode: 1,
       },
       handleScroll: {
         mouseWheel: true,
@@ -200,10 +190,17 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
         vertTouchDrag: true,
       },
       handleScale: {
-        axisPressedMouseMove: true,
+        axisPressedMouseMove: {
+          time: true,
+          price: true,
+        },
         mouseWheel: true,
         pinch: true,
       },
+      kineticScroll: {
+        mouse: true,
+        touch: true,
+      }
     })
 
     const lineSeries = chart.addSeries(LineSeries, {
@@ -212,8 +209,8 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
       priceLineVisible: false,
       priceFormat: {
         type: 'price',
-        precision: 4, // 4 decimal places
-        minMove: 0.0001, // Minimum price movement
+        precision: 4,
+        minMove: 0.0001,
       },
       lastValueVisible: false,
       crosshairMarkerVisible: true,
@@ -243,34 +240,21 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
     }
   }, [market])
 
-  // Update chart data
+  // Update chart data when price history changes
   useEffect(() => {
     if (seriesRef.current && chartRef.current && priceHistory.length > 0) {
       try {
         seriesRef.current.setData(priceHistory)
+        
+        // Fit content and scroll to end
         chartRef.current.timeScale().fitContent()
         chartRef.current.timeScale().scrollToRealTime()
+        
       } catch (error) {
         console.error('Error updating chart:', error)
       }
     }
   }, [priceHistory])
-
-  // Handle timeframe change
-  const handleTimeframeChange = useCallback((timeframe: Timeframe) => {
-    setSelectedTimeframe(timeframe)
-    setShowTimeframeDropdown(false)
-  }, [])
-
-  // Close dropdown on click outside
-  useEffect(() => {
-    const handleClickOutside = () => {
-      setShowTimeframeDropdown(false)
-    }
-    
-    document.addEventListener('click', handleClickOutside)
-    return () => document.removeEventListener('click', handleClickOutside)
-  }, [])
 
   // Clear price history when market changes
   useEffect(() => {
@@ -322,91 +306,69 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
         .lightweight-charts-attr {
           display: none !important;
         }
+        
+        /* Make time scale more visible */
+        .tv-time-scale,
+        .time-scale {
+          font-size: 11px !important;
+          color: #9CA3AF !important;
+          visibility: visible !important;
+          opacity: 1 !important;
+        }
       `}</style>
+      
       <div className="flex justify-between items-center mb-6">
         <div>
           <h3 className="text-lg font-semibold text-gray-300">Price Chart</h3>
           <p className="text-sm text-gray-400">
-            {market.ticker} • Line chart • {priceHistory.length} points
+            {market.ticker} • Real-time • {priceHistory.length} points
           </p>
         </div>
         
-        <div className="flex items-center space-x-4">
-          <div className="relative">
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                setShowTimeframeDropdown(!showTimeframeDropdown)
-              }}
-              className="flex items-center justify-between px-3 py-2 bg-gray-900/50 border border-gray-700 rounded-lg hover:bg-gray-800 transition-colors min-w-[80px]"
-            >
-              <span className="text-gray-300">View</span>
-              <svg className="w-4 h-4 ml-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </button>
-            
-            {showTimeframeDropdown && (
-              <div className="absolute right-0 mt-1 z-20 bg-gray-900 border border-gray-700 rounded-lg shadow-lg min-w-[80px]">
-                {TIMEFRAMES.map((tf) => (
-                  <button
-                    key={tf.label}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleTimeframeChange(tf)
-                    }}
-                    className={`w-full px-3 py-2 text-left hover:bg-gray-800 transition-colors first:rounded-t-lg last:rounded-b-lg ${
-                      selectedTimeframe.label === tf.label 
-                        ? 'bg-gray-800 text-blue-400' 
-                        : 'text-gray-300'
-                    }`}
-                  >
-                    {tf.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          
-          <div className="text-right">
-            <div className="text-sm text-gray-400">Current Price</div>
-            <div className="text-xl font-bold text-white">
-              {formattedCurrentPrice}
-              <span className="text-sm text-gray-400 ml-1">
-                {market?.quoteDenom?.toUpperCase()}
-              </span>
-            </div>
+        <div className="text-right">
+          <div className="text-sm text-gray-400">Current Price</div>
+          <div className="text-xl font-bold text-white">
+            {formattedCurrentPrice}
+            <span className="text-sm text-gray-400 ml-1">
+              {market?.quoteDenom?.toUpperCase()}
+            </span>
           </div>
         </div>
       </div>
       
       <div 
         ref={chartContainerRef} 
-        className="h-64 rounded-lg overflow-hidden bg-gray-900/30"
+        className="h-64 rounded-lg overflow-hidden bg-gray-900/30 cursor-crosshair"
         style={{ 
           minHeight: '256px',
           position: 'relative',
           zIndex: 1
         }}
+        title="Mouse wheel: Zoom • Drag: Pan"
       />
       
       <div className="mt-4 pt-4 border-t border-gray-700/50">
         {hasPriceData ? (
           <>
-            <div className="text-center">
-              <p className="text-gray-500">Price chart active</p>
-              <p className="text-sm text-gray-600 mt-1">
-                Current: <span className="font-medium text-white">{formattedCurrentPrice}</span> • 
-                Points: {priceHistory.length} • 
-                <span className="ml-2 text-gray-500">
-                  {market?.quoteDenom?.toUpperCase()}
-                </span>
-              </p>
+            <div className="flex justify-between items-center text-sm text-gray-500">
+              <div>
+                <p>Last 5 minutes • Updates: 1s</p>
+                <p className="mt-1 text-xs">Points: {priceHistory.length} • {formatPriceToFourDecimals(currentPrice)} {market?.quoteDenom?.toUpperCase()}</p>
+              </div>
+              <div className="text-right">
+                <p>Price Range: {priceHistory.length > 0 ? 
+                  `${formatPriceToFourDecimals(Math.min(...priceHistory.map(p => p.value)))} - ${formatPriceToFourDecimals(Math.max(...priceHistory.map(p => p.value)))}` 
+                  : 'Calculating...'}
+                </p>
+                <p className="mt-1 text-xs">
+                  Use mouse wheel to zoom • Drag to pan
+                </p>
+              </div>
             </div>
             
             <div className="mt-4 text-xs text-gray-500 text-center">
-              <p>Line chart showing market mid-price over time</p>
-              <p className="mt-1">Auto-refresh: 1s • Hover to see values • 4 decimal precision</p>
+              <p>Real-time mid-price from order book • Hover for exact values</p>
+              <p className="mt-1">Time shows in local timezone • 4 decimal precision</p>
             </div>
           </>
         ) : (
@@ -416,7 +378,7 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
               Current price: <span className="font-medium text-white">{formattedCurrentPrice}</span>
             </p>
             <p className="text-xs text-gray-500 mt-2">
-              Collecting price data points...
+              Collecting price data points (updates every second)...
             </p>
           </div>
         )}
