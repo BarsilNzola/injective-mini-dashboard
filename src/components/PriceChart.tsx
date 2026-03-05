@@ -1,123 +1,129 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { createChart, ColorType, IChartApi, ISeriesApi, LineSeries, Time } from 'lightweight-charts'
-import { Market, Orderbook } from '../types'
-import { convertPriceFromApi } from '../utils/format'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import {
+  createChart,
+  ColorType,
+  IChartApi,
+  ISeriesApi,
+  CandlestickSeries,
+  Time,
+} from 'lightweight-charts'
+import { Market } from '../types'
+import { injectiveClient } from '../api/injectiveClient'
 import Loader from './Loader'
 
 interface PriceChartProps {
-  trades: any[]
-  orderbook: Orderbook
   market: Market | null
   loading: boolean
   error: string | null
 }
 
-interface LineData {
+interface OhlcCandle {
   time: Time
-  value: number
+  open: number
+  high: number
+  low: number
+  close: number
 }
 
-export default function PriceChart({ orderbook, market, loading, error }: PriceChartProps) {
+interface Timeframe {
+  label: string
+  ms: number
+  interval: string
+}
+
+const TIMEFRAMES: Timeframe[] = [
+  { label: '1m',  ms: 60 * 1000,          interval: '1 minute'   },
+  { label: '5m',  ms: 5 * 60 * 1000,      interval: '5 minutes'  },
+  { label: '15m', ms: 15 * 60 * 1000,     interval: '15 minutes' },
+  { label: '1H',  ms: 60 * 60 * 1000,     interval: '1 hour'     },
+  { label: '4H',  ms: 4 * 60 * 60 * 1000, interval: '4 hours'    },
+  { label: '1D',  ms: 24 * 60 * 60 * 1000,interval: '1 day'      },
+]
+
+// Accumulates raw price ticks into OHLC candles for a given timeframe
+function buildCandles(ticks: { time: number; price: number }[], timeframeMs: number): OhlcCandle[] {
+  if (ticks.length === 0) return []
+
+  const buckets = new Map<number, { open: number; high: number; low: number; close: number }>()
+
+  for (const tick of ticks) {
+    const bucketTime = Math.floor(tick.time / timeframeMs) * timeframeMs
+
+    if (!buckets.has(bucketTime)) {
+      buckets.set(bucketTime, {
+        open: tick.price,
+        high: tick.price,
+        low: tick.price,
+        close: tick.price,
+      })
+    } else {
+      const candle = buckets.get(bucketTime)!
+      candle.high = Math.max(candle.high, tick.price)
+      candle.low = Math.min(candle.low, tick.price)
+      candle.close = tick.price
+    }
+  }
+
+  return Array.from(buckets.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([time, ohlc]) => ({
+      time: Math.floor(time / 1000) as Time,
+      ...ohlc,
+    }))
+}
+
+export default function PriceChart({ market, loading, error }: PriceChartProps) {
+  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(TIMEFRAMES[0])
+  const [showTimeframeDropdown, setShowTimeframeDropdown] = useState(false)
+  const [candles, setCandles] = useState<OhlcCandle[]>([])
+  const [currentPrice, setCurrentPrice] = useState<string>('—')
+  const [hoveredCandle, setHoveredCandle] = useState<OhlcCandle | null>(null)
+
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
-  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
-  const [priceHistory, setPriceHistory] = useState<LineData[]>([])
-  const samplingIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const ticksRef = useRef<{ time: number; price: number }[]>([])
 
-  // Calculate current market price with conversion
-  const getCurrentMarketPrice = useCallback((): number => {
-    if (!orderbook || !orderbook.bids || !orderbook.asks || !market) {
-      return 0
-    }
-    
-    const bestBid = orderbook.bids[0]
-    const bestAsk = orderbook.asks[0]
-    
-    if (!bestBid && !bestAsk) {
-      return 0
-    }
-    
-    let bidPrice = 0
-    let askPrice = 0
-    
-    if (bestBid) {
-      bidPrice = convertPriceFromApi(bestBid.price, market.baseDenom, market.quoteDenom)
-    }
-    
-    if (bestAsk) {
-      askPrice = convertPriceFromApi(bestAsk.price, market.baseDenom, market.quoteDenom)
-    }
-    
-    // Calculate mid price
-    if (bidPrice > 0 && askPrice > 0) {
-      return (bidPrice + askPrice) / 2
-    }
-    
-    if (bidPrice > 0) return bidPrice
-    if (askPrice > 0) return askPrice
-    
-    return 0
-  }, [orderbook, market])
-
-  // Format price to 4 decimal places
-  const formatPriceToFourDecimals = useCallback((price: number): string => {
-    if (price <= 0) return '0.0000'
-    return price.toFixed(4)
-  }, [])
-
-  // Get formatted current price for display
-  const formattedCurrentPrice = useMemo(() => {
-    if (!market) return '0.0000'
-    
-    const currentPrice = getCurrentMarketPrice()
-    return formatPriceToFourDecimals(currentPrice)
-  }, [market, getCurrentMarketPrice, formatPriceToFourDecimals])
-
-  // Start price sampling every second
+  // Reset on market change
   useEffect(() => {
-    if (!market) {
-      if (samplingIntervalRef.current) {
-        clearInterval(samplingIntervalRef.current)
-        samplingIntervalRef.current = null
-      }
-      return
+    ticksRef.current = []
+    setCandles([])
+    setCurrentPrice('—')
+    setHoveredCandle(null)
+  }, [market?.id])
+
+  // Poll Pyth Hermes every 1s for live price
+  useEffect(() => {
+    if (!market) return
+
+    const poll = async () => {
+      const { price } = await injectiveClient.getCurrentPrice(market)
+      if (price === '0') return
+
+      const num = parseFloat(price)
+      if (isNaN(num)) return
+
+      // Format current price display
+      const formatted = num >= 10_000
+        ? num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : num >= 1 ? num.toFixed(4)
+        : num.toPrecision(4)
+      setCurrentPrice(formatted)
+
+      // Accumulate tick — cap at 10k points to avoid memory growth
+      ticksRef.current = [...ticksRef.current, { time: Date.now(), price: num }].slice(-10000)
+      setCandles(buildCandles(ticksRef.current, selectedTimeframe.ms))
     }
 
-    if (samplingIntervalRef.current) {
-      clearInterval(samplingIntervalRef.current)
-    }
+    poll()
+    const interval = setInterval(poll, 1000)
+    return () => clearInterval(interval)
+  }, [market, selectedTimeframe.ms])
 
-    samplingIntervalRef.current = setInterval(() => {
-      const currentPrice = getCurrentMarketPrice()
-      
-      if (currentPrice > 0) {
-        const now = Date.now()
-        const nowInSeconds = Math.floor(now / 1000)
-        
-        setPriceHistory(prev => {
-          const newPoint: LineData = {
-            time: nowInSeconds as Time,
-            value: currentPrice
-          }
-          
-          const updated = [...prev, newPoint]
-          
-          // Keep last 300 points (5 minutes at 1-second intervals)
-          if (updated.length > 300) {
-            return updated.slice(-300)
-          }
-          return updated
-        })
-      }
-    }, 1000)
-
-    return () => {
-      if (samplingIntervalRef.current) {
-        clearInterval(samplingIntervalRef.current)
-        samplingIntervalRef.current = null
-      }
-    }
-  }, [market, getCurrentMarketPrice])
+  // Rebuild candles when timeframe changes
+  useEffect(() => {
+    setCandles(buildCandles(ticksRef.current, selectedTimeframe.ms))
+  }, [selectedTimeframe])
 
   // Initialize chart
   useEffect(() => {
@@ -125,264 +131,224 @@ export default function PriceChart({ orderbook, market, loading, error }: PriceC
 
     if (chartRef.current) {
       chartRef.current.remove()
+      chartRef.current = null
+      seriesRef.current = null
     }
 
     const chart = createChart(chartContainerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: '#1F2937' },
+        background: { type: ColorType.Solid, color: '#111827' },
         textColor: '#9CA3AF',
       },
       grid: {
-        vertLines: { color: '#374151', visible: true },
-        horzLines: { color: '#374151', visible: true },
+        vertLines: { color: '#1F2937' },
+        horzLines: { color: '#1F2937' },
+      },
+      crosshair: {
+        vertLine: { color: '#4B5563', labelBackgroundColor: '#374151' },
+        horzLine: { color: '#4B5563', labelBackgroundColor: '#374151' },
       },
       width: chartContainerRef.current.clientWidth,
-      height: 300,
-      rightPriceScale: {
-        borderColor: '#374151',
-        borderVisible: true,
-        autoScale: true,
-        scaleMargins: {
-          top: 0.1,
-          bottom: 0.1,
-        },
-        entireTextOnly: false,
-      },
-      leftPriceScale: {
-        visible: false,
-      },
+      height: 400,
       timeScale: {
         borderColor: '#374151',
         timeVisible: true,
         secondsVisible: true,
-        rightBarStaysOnScroll: true,
-        rightOffset: 12,
-        barSpacing: 6,
-        minBarSpacing: 0.5,
-        fixLeftEdge: true,
-        fixRightEdge: false,
-        lockVisibleTimeRangeOnResize: true,
-        visible: true,
-        borderVisible: true,
-        ticksVisible: true,
       },
-      crosshair: {
-        vertLine: {
-          color: '#6B7280',
-          width: 1,
-          style: 2,
-          visible: true,
-          labelVisible: true,
-        },
-        horzLine: {
-          color: '#6B7280',
-          width: 1,
-          style: 2,
-          visible: true,
-          labelVisible: true,
-        },
-        mode: 1,
+      rightPriceScale: {
+        borderColor: '#374151',
+        scaleMargins: { top: 0.1, bottom: 0.15 },
       },
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-        horzTouchDrag: true,
-        vertTouchDrag: true,
-      },
-      handleScale: {
-        axisPressedMouseMove: {
-          time: true,
-          price: true,
-        },
-        mouseWheel: true,
-        pinch: true,
-      },
-      kineticScroll: {
-        mouse: true,
-        touch: true,
-      }
     })
 
-    const lineSeries = chart.addSeries(LineSeries, {
-      color: '#3B82F6',
-      lineWidth: 2,
-      priceLineVisible: false,
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor:          '#10B981',
+      downColor:        '#EF4444',
+      borderUpColor:    '#10B981',
+      borderDownColor:  '#EF4444',
+      wickUpColor:      '#10B981',
+      wickDownColor:    '#EF4444',
       priceFormat: {
         type: 'price',
         precision: 4,
         minMove: 0.0001,
       },
-      lastValueVisible: false,
-      crosshairMarkerVisible: true,
-      crosshairMarkerRadius: 4,
     })
 
-    chartRef.current = chart
-    seriesRef.current = lineSeries
+    // OHLC tooltip on crosshair move
+    chart.subscribeCrosshairMove(param => {
+      if (!param || !param.time || !seriesRef.current) {
+        setHoveredCandle(null)
+        return
+      }
+      const data = param.seriesData.get(seriesRef.current) as OhlcCandle | undefined
+      setHoveredCandle(data ?? null)
+    })
 
     const handleResize = () => {
-      if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-        })
+      if (chartRef.current && chartContainerRef.current) {
+        chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth })
       }
     }
-
     window.addEventListener('resize', handleResize)
+
+    chartRef.current = chart
+    seriesRef.current = series
 
     return () => {
       window.removeEventListener('resize', handleResize)
-      if (chartRef.current) {
-        chartRef.current.remove()
-        chartRef.current = null
-        seriesRef.current = null
-      }
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
     }
   }, [market])
 
-  // Update chart data when price history changes
+  // Push candle updates to chart without recreating it
   useEffect(() => {
-    if (seriesRef.current && chartRef.current && priceHistory.length > 0) {
-      try {
-        seriesRef.current.setData(priceHistory)
-        
-        // Fit content and scroll to end
-        chartRef.current.timeScale().fitContent()
-        chartRef.current.timeScale().scrollToRealTime()
-        
-      } catch (error) {
-        console.error('Error updating chart:', error)
+    if (!seriesRef.current || candles.length === 0) return
+    seriesRef.current.setData(candles)
+    chartRef.current?.timeScale().scrollToRealTime()
+  }, [candles])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('.timeframe-dropdown')) {
+        setShowTimeframeDropdown(false)
       }
     }
-  }, [priceHistory])
+    document.addEventListener('click', handler)
+    return () => document.removeEventListener('click', handler)
+  }, [])
 
-  // Clear price history when market changes
-  useEffect(() => {
-    setPriceHistory([])
-  }, [market?.id])
+  const stats = useMemo(() => {
+    if (candles.length === 0) return null
+    const first = candles[0]
+    const last = candles[candles.length - 1]
+    const change = last.close - first.open
+    const pct = (change / first.open) * 100
+    return {
+      open:  first.open,
+      high:  Math.max(...candles.map(c => c.high)),
+      low:   Math.min(...candles.map(c => c.low)),
+      close: last.close,
+      change,
+      pct,
+    }
+  }, [candles])
 
-  // Loading state
-  if (loading && !orderbook) {
+  const fmt = (n: number) =>
+    n >= 10_000
+      ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : n >= 1 ? n.toFixed(4)
+      : n.toPrecision(4)
+
+  if (loading && candles.length === 0) {
+    return <div className="bg-gray-800/50 rounded-xl p-6 h-96"><Loader /></div>
+  }
+
+  if (error && candles.length === 0) {
     return (
-      <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 h-80">
-        <Loader />
+      <div className="bg-gray-800/50 rounded-xl p-6 h-96 flex items-center justify-center text-red-400">
+        {error}
       </div>
     )
   }
 
-  // Error state
-  if (error && !orderbook) {
-    return (
-      <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 h-80 flex items-center justify-center">
-        <p className="text-red-400">Error loading chart data: {error}</p>
-      </div>
-    )
-  }
-
-  // No market selected
   if (!market) {
     return (
-      <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 h-80 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-gray-400 mb-4">
-            <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-            </svg>
-          </div>
-          <h3 className="text-lg font-semibold text-gray-300 mb-2">Price Chart</h3>
-          <p className="text-gray-500">Select a market to view price chart</p>
-        </div>
+      <div className="bg-gray-800/50 rounded-xl p-6 h-96 flex items-center justify-center text-gray-500">
+        Select a market
       </div>
     )
   }
 
-  const currentPrice = getCurrentMarketPrice()
-  const hasPriceData = priceHistory.length > 0 && currentPrice > 0
-
   return (
-    <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 animate-fadeIn">
-      <style>{`
-        .tv-attr,
-        .lightweight-charts-attr {
-          display: none !important;
-        }
-        
-        /* Make time scale more visible */
-        .tv-time-scale,
-        .time-scale {
-          font-size: 11px !important;
-          color: #9CA3AF !important;
-          visibility: visible !important;
-          opacity: 1 !important;
-        }
-      `}</style>
-      
-      <div className="flex justify-between items-center mb-6">
+    <div className="bg-gray-800/50 rounded-xl p-6 border border-gray-700/50">
+
+      {/* Header */}
+      <div className="flex justify-between items-start mb-4">
         <div>
-          <h3 className="text-lg font-semibold text-gray-300">Price Chart</h3>
-          <p className="text-sm text-gray-400">
-            {market.ticker} • Real-time • {priceHistory.length} points
+          <h3 className="text-lg font-semibold text-gray-300">{market.ticker}</h3>
+          <p className="text-sm text-gray-500">
+            {selectedTimeframe.interval} • {candles.length} candles
           </p>
         </div>
-        
-        <div className="text-right">
-          <div className="text-sm text-gray-400">Current Price</div>
-          <div className="text-xl font-bold text-white">
-            {formattedCurrentPrice}
-            <span className="text-sm text-gray-400 ml-1">
-              {market?.quoteDenom?.toUpperCase()}
-            </span>
+
+        <div className="flex items-center gap-4">
+
+          {/* Timeframe selector */}
+          <div className="relative timeframe-dropdown">
+            <div className="flex gap-1">
+              {TIMEFRAMES.map(tf => (
+                <button
+                  key={tf.label}
+                  onClick={() => setSelectedTimeframe(tf)}
+                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                    selectedTimeframe.label === tf.label
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-900 text-gray-400 hover:text-white hover:bg-gray-700'
+                  }`}
+                >
+                  {tf.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Current price */}
+          <div className="text-right">
+            <div className="text-xs text-gray-500 mb-0.5">Last Price</div>
+            <div className="text-xl font-bold font-mono text-white">
+              {currentPrice}
+            </div>
+            <div className="text-xs text-gray-500">{market.quoteSymbol}</div>
           </div>
         </div>
       </div>
-      
-      <div 
-        ref={chartContainerRef} 
-        className="h-64 rounded-lg overflow-hidden bg-gray-900/30 cursor-crosshair"
-        style={{ 
-          minHeight: '256px',
-          position: 'relative',
-          zIndex: 1
-        }}
-        title="Mouse wheel: Zoom • Drag: Pan"
-      />
-      
-      <div className="mt-4 pt-4 border-t border-gray-700/50">
-        {hasPriceData ? (
+
+      {/* OHLC tooltip — shows on crosshair hover, hidden otherwise */}
+      <div className="flex gap-4 text-xs font-mono mb-3 h-4">
+        {hoveredCandle ? (
           <>
-            <div className="flex justify-between items-center text-sm text-gray-500">
-              <div>
-                <p>Last 5 minutes • Updates: 1s</p>
-                <p className="mt-1 text-xs">Points: {priceHistory.length} • {formatPriceToFourDecimals(currentPrice)} {market?.quoteDenom?.toUpperCase()}</p>
-              </div>
-              <div className="text-right">
-                <p>Price Range: {priceHistory.length > 0 ? 
-                  `${formatPriceToFourDecimals(Math.min(...priceHistory.map(p => p.value)))} - ${formatPriceToFourDecimals(Math.max(...priceHistory.map(p => p.value)))}` 
-                  : 'Calculating...'}
-                </p>
-                <p className="mt-1 text-xs">
-                  Use mouse wheel to zoom • Drag to pan
-                </p>
-              </div>
-            </div>
-            
-            <div className="mt-4 text-xs text-gray-500 text-center">
-              <p>Real-time mid-price from order book • Hover for exact values</p>
-              <p className="mt-1">Time shows in local timezone • 4 decimal precision</p>
-            </div>
+            <span className="text-gray-500">O <span className="text-white">{fmt(hoveredCandle.open)}</span></span>
+            <span className="text-gray-500">H <span className="text-green-400">{fmt(hoveredCandle.high)}</span></span>
+            <span className="text-gray-500">L <span className="text-red-400">{fmt(hoveredCandle.low)}</span></span>
+            <span className="text-gray-500">C <span className="text-white">{fmt(hoveredCandle.close)}</span></span>
+            <span className={hoveredCandle.close >= hoveredCandle.open ? 'text-green-400' : 'text-red-400'}>
+              {hoveredCandle.close >= hoveredCandle.open ? '+' : ''}
+              {fmt(hoveredCandle.close - hoveredCandle.open)}
+            </span>
           </>
         ) : (
-          <div className="text-center py-4">
-            <p className="text-gray-500">Building price chart...</p>
-            <p className="text-sm text-gray-600 mt-1">
-              Current price: <span className="font-medium text-white">{formattedCurrentPrice}</span>
-            </p>
-            <p className="text-xs text-gray-500 mt-2">
-              Collecting price data points (updates every second)...
-            </p>
-          </div>
+          <span className="text-gray-600">Hover over a candle for OHLC details</span>
         )}
       </div>
+
+      {/* Chart */}
+      {candles.length === 0 ? (
+        <div className="w-full h-96 flex flex-col items-center justify-center text-gray-500 gap-2">
+          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
+          <span className="text-sm">Collecting price data...</span>
+          <span className="text-xs text-gray-600">Candles form as ticks arrive</span>
+        </div>
+      ) : (
+        <div ref={chartContainerRef} className="w-full h-96" />
+      )}
+
+      {/* Stats bar */}
+      {stats && (
+        <div className="mt-4 pt-3 border-t border-gray-700/50 flex flex-wrap gap-x-6 gap-y-1 text-xs font-mono">
+          <span className="text-gray-500">O <span className="text-gray-300">{fmt(stats.open)}</span></span>
+          <span className="text-gray-500">H <span className="text-green-400">{fmt(stats.high)}</span></span>
+          <span className="text-gray-500">L <span className="text-red-400">{fmt(stats.low)}</span></span>
+          <span className="text-gray-500">C <span className="text-gray-300">{fmt(stats.close)}</span></span>
+          <span className={stats.change >= 0 ? 'text-green-400' : 'text-red-400'}>
+            {stats.change >= 0 ? '+' : ''}{fmt(stats.change)} ({stats.pct.toFixed(2)}%)
+          </span>
+          <span className="text-gray-600 ml-auto">{candles.length} candles • {ticksRef.current.length} ticks</span>
+        </div>
+      )}
     </div>
   )
 }

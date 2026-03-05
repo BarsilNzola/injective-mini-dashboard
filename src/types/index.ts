@@ -2,12 +2,16 @@
 export interface Market {
   id: string;
   ticker: string;
+  // Normalized symbols for oracle lookups (e.g. "INJ", "USDT")
+  baseSymbol: string;
+  quoteSymbol: string;
   baseDenom: string;
   quoteDenom: string;
-  type: 'spot' | 'derivatives';
-  minPriceTickSize: number;
-  minQuantityTickSize: number;
-  marketStatus: string;
+  marketType: 'spot' | 'derivative';  // ← renamed from 'type', values updated
+  minPriceTickSize: string;            // ← changed from number to string (API returns strings)
+  minQuantityTickSize: string;         // ← same
+  baseDecimals: number;
+  quoteDecimals: number;
 }
 
 // Orderbook types

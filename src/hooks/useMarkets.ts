@@ -1,65 +1,69 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { injectiveClient } from '../api/injectiveClient'
 import { Market } from '../types'
+
+const REFRESH_INTERVAL = 30000
+const MAX_MARKETS = 20
 
 export function useMarkets() {
   const [markets, setMarkets] = useState<Market[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  useEffect(() => {
-    let mounted = true
-    let intervalId: NodeJS.Timeout
+  const isMounted = useRef(true)
 
-    const fetchMarkets = async (isInitialLoad = false) => {
-      try {
-        if (isInitialLoad) {
-          setLoading(true)
-        }
-        
-        const spotMarkets = await injectiveClient.getSpotMarkets()
-        
-        if (mounted) {
-          const formattedMarkets: Market[] = spotMarkets
-            .filter(market => market.marketStatus === 'active')
-            .map(market => ({
-              id: market.marketId,
-              ticker: market.ticker,
-              baseDenom: market.baseDenom,
-              quoteDenom: market.quoteDenom,
-              type: 'spot' as const,
-              minPriceTickSize: market.minPriceTickSize,
-              minQuantityTickSize: market.minQuantityTickSize,
-              marketStatus: market.marketStatus
-            }))
-            .slice(0, 20)
+  const fetchMarkets = useCallback(async (isInitialLoad = false) => {
+    try {
+      if (isInitialLoad) setLoading(true)
 
-          setMarkets(formattedMarkets)
-          setError(null)
-        }
-      } catch (err) {
-        if (mounted) {
-          setError(err instanceof Error ? err.message : 'Failed to fetch markets')
-          console.error('Error in useMarkets:', err)
-        }
-      } finally {
-        if (mounted && isInitialLoad) {
-          setLoading(false)
-        }
-      }
-    }
+      const allMarkets = await injectiveClient.getAllMarkets()
 
-    // Initial load
-    fetchMarkets(true)
+      if (!isMounted.current) return
 
-    // Auto-refresh every 30 seconds WITHOUT showing loading state
-    intervalId = setInterval(() => fetchMarkets(false), 30000)
+      // No mapper needed — injectiveClient.getAllMarkets() now returns Market-shaped objects directly
+      setMarkets(allMarkets.slice(0, MAX_MARKETS))
+      setError(null)
+      setLastUpdated(new Date())
 
-    return () => {
-      mounted = false
-      clearInterval(intervalId)
+    } catch (err) {
+      if (!isMounted.current) return
+      const errorMessage = err instanceof Error ? err.message : 'Failed to fetch markets'
+      setError(errorMessage)
+      console.error('Error in useMarkets:', err)
+
+    } finally {
+      if (isMounted.current && isInitialLoad) setLoading(false)
     }
   }, [])
 
-  return { markets, loading, error }
+  useEffect(() => {
+    isMounted.current = true
+    fetchMarkets(true)
+
+    const intervalId = setInterval(() => fetchMarkets(false), REFRESH_INTERVAL)
+
+    return () => {
+      isMounted.current = false
+      clearInterval(intervalId)
+    }
+  }, [fetchMarkets])
+
+  const refreshMarkets = useCallback(async () => {
+    await fetchMarkets(true)
+  }, [fetchMarkets])
+
+  const getMarketById = useCallback((id: string): Market | undefined => {
+    return markets.find(market => market.id === id)
+  }, [markets])
+
+  return {
+    markets,
+    loading,
+    error,
+    lastUpdated,
+    refreshMarkets,
+    getMarketById,
+    isEmpty: markets.length === 0 && !loading
+  }
 }

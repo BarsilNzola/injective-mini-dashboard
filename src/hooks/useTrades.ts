@@ -1,82 +1,119 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { injectiveClient, FormattedTrade } from '../api/injectiveClient'
+
+// Configuration
+const REFRESH_INTERVAL = 3000 // 3 seconds
+const MAX_TRADES = 50
 
 export function useTrades(marketId: string | null) {
   const [trades, setTrades] = useState<FormattedTrade[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  
+  // Refs for change detection and mounted state
   const previousPriceRef = useRef<string>('')
   const previousMarketIdRef = useRef<string | null>(null)
+  const isMounted = useRef(true)
 
-  useEffect(() => {
-    let mounted = true
-    let intervalId: NodeJS.Timeout
+  const fetchTrades = useCallback(async () => {
+    if (!marketId) {
+      setTrades([])
+      setLoading(false)
+      previousPriceRef.current = ''
+      return
+    }
 
-    const fetchTrades = async () => {
-      if (!marketId) {
-        if (mounted) {
-          setTrades([])
-          setLoading(false)
+    try {
+      const data = await injectiveClient.getSpotTrades(marketId, MAX_TRADES)
+      
+      if (!isMounted.current) return
+
+      if (data && data.length > 0) {
+        const latestTrade = data[0]
+        const latestPrice = latestTrade?.price || '0'
+        
+        // Reset comparison when market changes
+        const marketChanged = previousMarketIdRef.current !== marketId
+        if (marketChanged) {
+          previousMarketIdRef.current = marketId
           previousPriceRef.current = ''
         }
-        return
-      }
-
-      try {
-        console.log(`[${new Date().toISOString()}] Fetching trades for ${marketId}`)
-        const data = await injectiveClient.getSpotTrades(marketId)
         
-        if (mounted && data && data.length > 0) {
-          const latestTrade = data[0]
-          const latestPrice = latestTrade?.price || '0'
-          
-          // Reset comparison when market changes
-          const marketChanged = previousMarketIdRef.current !== marketId
-          if (marketChanged) {
-            console.log(`Market changed from ${previousMarketIdRef.current} to ${marketId}, forcing update`)
-            previousMarketIdRef.current = marketId
-            previousPriceRef.current = ''
-          }
-          
-          const previousPrice = previousPriceRef.current
-          
-          console.log(`Price comparison: new=${latestPrice}, old=${previousPrice}, changed=${latestPrice !== previousPrice}`)
-          
-          // Always update on first load, price changes, or market changes
-          if (previousPrice === '' || latestPrice !== previousPrice || marketChanged) {
-            console.log(`Price changed from ${previousPrice} to ${latestPrice}, updating UI`)
-            setTrades(data)
-            previousPriceRef.current = latestPrice
-            setError(null)
-          } else {
-            console.log('Price unchanged, skipping full update')
-          }
-          
-          setLoading(false)
-        } else if (mounted) {
-          // No data or empty data
-          setLoading(false)
+        const previousPrice = previousPriceRef.current
+        
+        // Always update on first load, price changes, or market changes
+        if (previousPrice === '' || latestPrice !== previousPrice || marketChanged) {
+          setTrades(data)
+          previousPriceRef.current = latestPrice
+          setError(null)
+          setLastUpdated(new Date())
         }
-      } catch (err) {
-        console.error('useTrades: Error fetching trades:', err)
-        if (mounted) {
-          setError(err instanceof Error ? err.message : 'Failed to fetch trades')
-          setLoading(false)
-        }
+        
+        setLoading(false)
+      } else if (data && data.length === 0) {
+        // No trades yet for this market
+        setTrades([])
+        setLoading(false)
       }
+    } catch (err) {
+      if (!isMounted.current) return
+      
+      setError(err instanceof Error ? err.message : 'Failed to fetch trades')
+      console.error('Error in useTrades:', err)
+      setLoading(false)
+    }
+  }, [marketId])
+
+  // Reset when marketId becomes null
+  useEffect(() => {
+    if (!marketId) {
+      setTrades([])
+      previousPriceRef.current = ''
+      previousMarketIdRef.current = null
+    }
+  }, [marketId])
+
+  // Main fetch effect
+  useEffect(() => {
+    isMounted.current = true
+    
+    if (marketId) {
+      fetchTrades()
     }
 
-    // Fetch immediately
-    fetchTrades()
-
-    // Set up auto-refresh every 3 seconds
-    intervalId = setInterval(fetchTrades, 3000)
+    const intervalId = setInterval(() => {
+      if (marketId) {
+        fetchTrades()
+      }
+    }, REFRESH_INTERVAL)
 
     return () => {
-      mounted = false
+      isMounted.current = false
       clearInterval(intervalId)
     }
-  }, [marketId]) // Only depend on marketId
+  }, [marketId, fetchTrades])
 
-  return { trades, loading, error }
+  // Derived values
+  const lastPrice = trades[0]?.price || null
+  const lastPriceChange = trades.length > 1 
+    ? (parseFloat(trades[0].price) - parseFloat(trades[1].price)).toFixed(4)
+    : null
+  const priceChangeDirection = lastPriceChange && parseFloat(lastPriceChange) > 0 ? 'up' : 
+                              lastPriceChange && parseFloat(lastPriceChange) < 0 ? 'down' : 'neutral'
+  const totalVolume = trades
+    .reduce((sum, trade) => sum + parseFloat(trade.quantity || '0'), 0)
+    .toFixed(4)
+
+  return { 
+    trades, 
+    loading, 
+    error,
+    lastUpdated,
+    lastPrice,
+    lastPriceChange,
+    priceChangeDirection,
+    totalVolume,
+    isEmpty: trades.length === 0 && !loading
+  }
 }

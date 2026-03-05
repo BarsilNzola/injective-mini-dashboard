@@ -1,373 +1,124 @@
-import { FormattedTrade } from '../api/injectiveClient'
-import { Market, Orderbook } from '../types'
-import { formatPrice, convertPriceFromApi } from '../utils/format'
+import { useState, useEffect, useCallback } from 'react'
+import { injectiveClient } from '../api/injectiveClient'
+import { Market } from '../types'
 import Loader from './Loader'
-import { useState, useEffect, useRef, useMemo } from 'react'
 
 interface PriceWidgetProps {
-  trades: FormattedTrade[]
-  orderbook: Orderbook
   market: Market | null
   loading: boolean
   error: string | null
 }
 
-export default function PriceWidget({ trades, orderbook, market, loading, error }: PriceWidgetProps) {
-  // Calculate current price from orderbook (mid price)
-  const currentMarketPrice = useMemo(() => {
-    const { bids = [], asks = [] } = orderbook
-    
-    if (bids.length === 0 && asks.length === 0) {
-      return '0'
-    }
-    
-    const bestBid = bids[0]
-    const bestAsk = asks[0]
-    
-    if (!bestBid && !bestAsk) return '0'
-    
-    if (bestBid && bestAsk) {
-      const bidPrice = parseFloat(bestBid.price)
-      const askPrice = parseFloat(bestAsk.price)
-      
-      if (!isNaN(bidPrice) && !isNaN(askPrice) && bidPrice > 0 && askPrice > 0) {
-        return ((bidPrice + askPrice) / 2).toString()
-      }
-    }
-    
-    if (bestBid && parseFloat(bestBid.price) > 0) {
-      return bestBid.price
-    }
-    if (bestAsk && parseFloat(bestAsk.price) > 0) {
-      return bestAsk.price
-    }
-    
-    return '0'
-  }, [orderbook])
+export default function PriceWidget({ market, loading }: PriceWidgetProps) {
+  const [price, setPrice] = useState<string>('0')
+  const [source, setSource] = useState<'pyth' | 'band' | 'none'>('pyth')
+  const [isLoading, setIsLoading] = useState(true)
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
 
-  // Last trade price
-  const lastTradePrice = trades[0]?.price || '0'
-  const lastTradeTimestamp = trades[0]?.timestamp || 0
-  
-  // Decide which price to display
-  const displayPrice = currentMarketPrice !== '0' ? currentMarketPrice : lastTradePrice
-  const priceSource = currentMarketPrice !== '0' ? 'orderbook' : 'last trade'
-  
-  // Timestamp for display
-  const displayTimestamp = currentMarketPrice !== '0' ? Date.now() : lastTradeTimestamp
-  
-  const tickSize = market?.minPriceTickSize || 0.0001
-  
-  // Animation state
-  const [isUpdating, setIsUpdating] = useState(false)
-  const [lastRefreshTime, setLastRefreshTime] = useState<number>(Date.now())
-  const previousPriceRef = useRef<string>('')
-  const updateCountRef = useRef(0)
+  const fetchPrice = useCallback(async () => {
+    if (!market) return
+    try {
+      const { price: currentPrice, source: priceSource } = await injectiveClient.getCurrentPrice(market)
+      setPrice(currentPrice)
+      setSource(priceSource)
+      if (currentPrice !== '0') setLastUpdate(new Date())
+    } catch (err) {
+      console.error('Failed to fetch price:', err)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [market])
 
-  // Update refresh time
   useEffect(() => {
-    if (displayPrice !== '0') {
-      setLastRefreshTime(Date.now())
-    }
-  }, [displayPrice])
+    if (!market) return
+    setIsLoading(true)
+    fetchPrice()
+    const interval = setInterval(fetchPrice, 1000)
+    return () => clearInterval(interval)
+  }, [market, fetchPrice])
 
-  // Format the price
-  const formattedPrice = useMemo(() => {
-    if (!displayPrice || displayPrice === '0') return '0'
-    return formatPrice(displayPrice, tickSize, market?.baseDenom, market?.quoteDenom)
-  }, [displayPrice, tickSize, market?.baseDenom, market?.quoteDenom])
-
-  // Animation effect
-  useEffect(() => {
-    if (displayPrice !== '0' && displayPrice !== previousPriceRef.current) {
-      setIsUpdating(true)
-      updateCountRef.current += 1
-      
-      const timer = setTimeout(() => setIsUpdating(false), 500)
-      previousPriceRef.current = displayPrice
-      return () => clearTimeout(timer)
-    }
-  }, [displayPrice])
-
-  // Calculate price difference
-  const priceDiff = useMemo(() => {
-    if (currentMarketPrice !== '0' && lastTradePrice !== '0' && currentMarketPrice !== lastTradePrice) {
-      const current = parseFloat(currentMarketPrice)
-      const last = parseFloat(lastTradePrice)
-      if (!isNaN(current) && !isNaN(last) && last > 0) {
-        const diff = current - last
-        const percent = (diff / last) * 100
-        return {
-          value: diff,
-          percent,
-          isPositive: diff > 0
-        }
-      }
-    }
-    return null
-  }, [currentMarketPrice, lastTradePrice])
-
-  // Calculate 24h stats
-  const { highPrice, lowPrice, volume24h } = useMemo(() => {
-    const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000
-    const recentTrades = trades.filter(trade => {
-      const tradePrice = parseFloat(trade.price)
-      return trade.timestamp > twentyFourHoursAgo && !isNaN(tradePrice) && tradePrice > 0
-    })
-    
-    let high = parseFloat(displayPrice) || 0
-    let low = parseFloat(displayPrice) || 0
-    let volume = 0
-    
-    if (recentTrades.length > 0) {
-      const prices = recentTrades.map(t => 
-        convertPriceFromApi(t.price, market?.baseDenom, market?.quoteDenom)
-      ).filter(p => !isNaN(p) && p > 0)
-      
-      if (prices.length > 0) {
-        high = Math.max(...prices)
-        low = Math.min(...prices)
-      }
-      
-      volume = recentTrades.reduce((sum, trade) => {
-        const price = convertPriceFromApi(trade.price, market?.baseDenom, market?.quoteDenom)
-        const quantity = parseFloat(trade.quantity) || 0
-        return sum + (price * quantity)
-      }, 0)
-    }
-    
-    return { 
-      highPrice: high.toFixed(4), 
-      lowPrice: low.toFixed(4), 
-      volume24h: volume.toFixed(2) 
-    }
-  }, [trades, displayPrice, market?.baseDenom, market?.quoteDenom])
-
-  // Check if data is stale
-  const isDataStale = useMemo(() => {
-    const now = Date.now()
-    const lastUpdateTime = Math.max(lastTradeTimestamp, lastRefreshTime)
-    return now - lastUpdateTime > 5 * 60 * 1000
-  }, [lastTradeTimestamp, lastRefreshTime])
-
-  // Format market name
-  const formattedMarketName = useMemo(() => {
-    if (!market?.ticker) return 'Select a market'
-    
-    const [base, quote] = market.ticker.split('/')
-    if (!base || !quote) return market.ticker
-    
-    // Shorten long addresses
-    const shorten = (str: string) => 
-      str.length > 12 ? `${str.slice(0, 6)}...${str.slice(-4)}` : str
-    
-    return `${shorten(base)}/${shorten(quote)}`
-  }, [market?.ticker])
-
-  // Format quote denom
-  const formattedQuoteDenom = useMemo(() => {
-    if (!market?.quoteDenom) return ''
-    return market.quoteDenom.length > 8 
-      ? `${market.quoteDenom.slice(0, 6)}...` 
-      : market.quoteDenom
-  }, [market?.quoteDenom])
-
-  // Calculate spread and best bid/ask - FIXED FORMATTING
-  const spreadInfo = useMemo(() => {
-    const { bids = [], asks = [] } = orderbook
-    
-    if (bids.length === 0 || asks.length === 0) {
-      return null
-    }
-    
-    const bestBid = bids[0]
-    const bestAsk = asks[0]
-    
-    if (!bestBid || !bestAsk) {
-      return null
-    }
-    
-    const bidPrice = parseFloat(bestBid.price)
-    const askPrice = parseFloat(bestAsk.price)
-    
-    if (isNaN(bidPrice) || isNaN(askPrice) || bidPrice <= 0 || askPrice <= 0) {
-      return null
-    }
-    
-    const spread = askPrice - bidPrice
-    const spreadPercent = (spread / bidPrice) * 100
-    
-    // Format prices based on their magnitude
-    const formatSmallPrice = (price: number): string => {
-      if (price < 0.0001) return price.toExponential(2)
-      if (price < 0.01) return price.toFixed(6)
-      if (price < 1) return price.toFixed(4)
-      if (price < 100) return price.toFixed(3)
-      if (price < 1000) return price.toFixed(2)
-      return price.toFixed(1)
-    }
-    
-    return {
-      bid: formatPrice(bestBid.price, tickSize, market?.baseDenom, market?.quoteDenom),
-      ask: formatPrice(bestAsk.price, tickSize, market?.baseDenom, market?.quoteDenom),
-      spread: formatSmallPrice(spread),
-      spreadPercent: spreadPercent.toFixed(2)
-    }
-  }, [orderbook, market, tickSize])
-
-  // Log orderbook data for debugging
-  useEffect(() => {
-    if (orderbook && orderbook.bids?.length > 0 && orderbook.asks?.length > 0) {
-      const bestBid = orderbook.bids[0]
-      const bestAsk = orderbook.asks[0]
-      console.log('Orderbook data in PriceWidget:', {
-        bidRaw: bestBid.price,
-        askRaw: bestAsk.price,
-        bidParsed: parseFloat(bestBid.price),
-        askParsed: parseFloat(bestAsk.price),
-        tickSize,
-        formattedBid: formatPrice(bestBid.price, tickSize, market?.baseDenom, market?.quoteDenom),
-        formattedAsk: formatPrice(bestAsk.price, tickSize, market?.baseDenom, market?.quoteDenom)
-      })
-    }
-  }, [orderbook, market, tickSize])
-
-  if (loading && trades.length === 0) {
-    return (
-      <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50">
-        <div className="h-64 flex items-center justify-center">
-          <Loader />
-        </div>
-      </div>
-    )
+  const formattedPrice = (price: string): string => {
+    const num = parseFloat(price)
+    if (isNaN(num) || num === 0) return '—'
+    if (num >= 10_000) return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    if (num >= 1) return num.toFixed(4)
+    return num.toPrecision(4)
   }
 
-  if (error && trades.length === 0) {
+  const sourceConfig = {
+    pyth: { color: 'text-purple-400', bg: 'bg-purple-500/10', text: 'Pyth', border: 'border-purple-500/20' },
+    band: { color: 'text-blue-400', bg: 'bg-blue-500/10', text: 'Band', border: 'border-blue-500/20' },
+    none: { color: 'text-gray-400', bg: 'bg-gray-500/10', text: 'N/A', border: 'border-gray-500/20' },
+  }
+
+  if (loading || !market) {
     return (
-      <div className="bg-red-900/20 border border-red-500/30 rounded-xl p-6">
-        <p className="text-red-400">Error loading price: {error}</p>
+      <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 border border-gray-700/50 h-64">
+        <Loader />
       </div>
     )
   }
 
   return (
     <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-4 sm:p-6 border border-gray-700/50">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start gap-3 mb-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <h2 className="text-lg font-semibold text-gray-300 truncate">Market Price</h2>
-            {!loading && displayPrice !== '0' && !isDataStale && (
-              <div className="flex items-center shrink-0">
-                <div className={`w-2 h-2 rounded-full ${isUpdating ? 'bg-green-500 animate-pulse' : 'bg-green-500'}`}></div>
-                <span className="ml-1 text-xs text-green-400">LIVE</span>
-              </div>
-            )}
+      <div className="flex justify-between items-start mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-300">{market.ticker}</h2>
+          <div className="text-xs text-gray-500 mt-0.5">
+            Oracle: {market.baseSymbol}/{market.quoteSymbol}
           </div>
-          <p className="text-sm text-gray-400 truncate" title={market?.ticker}>
-            {formattedMarketName}
-          </p>
           <div className="flex items-center gap-2 mt-1">
-            <span className="text-xs text-gray-500">Source:</span>
-            <span className={`text-xs ${priceSource === 'orderbook' ? 'text-green-400' : 'text-yellow-400'}`}>
-              {priceSource}
+            <span className={`text-xs px-2 py-0.5 rounded-full ${sourceConfig[source].bg} ${sourceConfig[source].color} border ${sourceConfig[source].border}`}>
+              {sourceConfig[source].text}
             </span>
-            {isDataStale && (
-              <span className="text-xs text-yellow-500">• stale</span>
-            )}
+            <span className="text-xs text-gray-500">
+              {source === 'pyth' ? 'High-Frequency' : source === 'band' ? 'Standard' : 'Unavailable'}
+            </span>
           </div>
         </div>
-        <div className="text-right shrink-0">
-          <div className="text-xs text-gray-400">Updated</div>
-          <div className={`text-sm ${isDataStale ? 'text-yellow-400' : 'text-gray-300'}`}>
-            {displayTimestamp ? new Date(displayTimestamp).toLocaleTimeString([], { 
-              hour: '2-digit', 
-              minute: '2-digit',
-              second: '2-digit'
-            }) : '--:--:--'}
-          </div>
-        </div>
-      </div>
-
-      {/* Price Display */}
-      <div className="text-center py-4">
-        <div className={`text-3xl sm:text-4xl font-bold mb-2 transition-all duration-300 ${
-          isUpdating ? 'text-white scale-105' : 'text-white'
-        }`}>
-          {displayPrice === '0' ? (
-            <div className="text-xl text-gray-500">No price data</div>
-          ) : (
-            <div className="break-all px-2">{formattedPrice}</div>
-          )}
-        </div>
-        <div className="text-sm text-gray-400 mb-1">
-          {formattedQuoteDenom}
-        </div>
-        
-        {/* Price Difference */}
-        {priceDiff && (
-          <div className={`text-sm ${priceDiff.isPositive ? 'text-green-400' : 'text-red-400'}`}>
-            {priceDiff.isPositive ? '↗' : '↘'} 
-            {Math.abs(priceDiff.value).toFixed(4)} ({Math.abs(priceDiff.percent).toFixed(2)}%) vs trade
+        {lastUpdate && (
+          <div className="text-right">
+            <div className="text-xs text-gray-400">Last Update</div>
+            <div className="text-sm text-gray-300">
+              {lastUpdate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Stats */}
-      {displayPrice !== '0' && (
-        <div className="mt-4 pt-4 border-t border-gray-700/50">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
-            <div>
-              <div className="text-xs text-gray-400 mb-1">24h High</div>
-              <div className="text-sm text-green-400 font-medium truncate">
-                {highPrice}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-400 mb-1">24h Low</div>
-              <div className="text-sm text-red-400 font-medium truncate">
-                {lowPrice}
-              </div>
-            </div>
-            <div className="col-span-2 sm:col-span-1">
-              <div className="text-xs text-gray-400 mb-1">24h Volume</div>
-              <div className="text-sm text-blue-400 font-medium truncate">
-                {volume24h} {formattedQuoteDenom}
-              </div>
-            </div>
+      <div className="text-center py-6">
+        {isLoading ? (
+          <div className="flex justify-center items-center py-8">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+            <span className="ml-3 text-gray-400">Fetching price...</span>
           </div>
-          
-          {/* Orderbook Info - FIXED: Using formatPrice */}
-          {spreadInfo ? (
-            <div className="pt-3 border-t border-gray-700/30">
-              <div className="flex justify-between items-center mb-2">
-                <div className="text-xs text-gray-400">Spread</div>
-                <div className="text-sm text-purple-400 font-medium">
-                  {spreadInfo.spread} ({spreadInfo.spreadPercent}%)
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="bg-gray-900/30 p-2 rounded">
-                  <div className="text-gray-400 mb-1">Best Bid</div>
-                  <div className="text-green-400 font-medium">{spreadInfo.bid}</div>
-                </div>
-                <div className="bg-gray-900/30 p-2 rounded">
-                  <div className="text-gray-400 mb-1">Best Ask</div>
-                  <div className="text-red-400 font-medium">{spreadInfo.ask}</div>
-                </div>
-              </div>
+        ) : price === '0' ? (
+          <div className="text-gray-500 py-8">
+            Price unavailable for {market.baseSymbol}/{market.quoteSymbol}
+          </div>
+        ) : (
+          <>
+            <div className="text-4xl sm:text-5xl font-bold text-white mb-2 font-mono">
+              {formattedPrice(price)}
             </div>
-          ) : (
-            <div className="pt-3 border-t border-gray-700/30">
-              <div className="text-xs text-gray-500 text-center py-2">
-                {orderbook.bids?.length === 0 || orderbook.asks?.length === 0
-                  ? 'Waiting for orderbook data...'
-                  : 'No spread data available'}
+            <div className="text-sm text-gray-400 mb-1">{market.quoteSymbol}</div>
+            <div className="mt-4 flex justify-center gap-4 text-xs">
+              <div className="flex items-center gap-1">
+                <div className={`w-2 h-2 rounded-full animate-pulse ${source === 'pyth' ? 'bg-purple-500' : 'bg-green-500'}`} />
+                <span className="text-gray-400">Live</span>
               </div>
+              <div className="text-gray-500">Updates every 1s</div>
             </div>
-          )}
-        </div>
-      )}
+          </>
+        )}
+      </div>
+
+      <div className="mt-2 text-xs text-gray-500 text-center">
+        <span>Powered by </span>
+        <a href="https://pyth.network" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:underline">Pyth Network</a>
+        <span className="mx-2">•</span>
+        <a href="https://bandprotocol.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">Band Protocol</a>
+      </div>
     </div>
   )
 }
