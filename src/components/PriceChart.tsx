@@ -9,7 +9,6 @@ import {
 } from 'lightweight-charts'
 import { Market } from '../types'
 import { injectiveClient } from '../api/injectiveClient'
-import Loader from './Loader'
 
 interface PriceChartProps {
   market: Market | null
@@ -32,12 +31,12 @@ interface Timeframe {
 }
 
 const TIMEFRAMES: Timeframe[] = [
-  { label: '1m',  ms: 60 * 1000,           interval: '1 minute'  },
-  { label: '5m',  ms: 5 * 60 * 1000,       interval: '5 minutes' },
-  { label: '15m', ms: 15 * 60 * 1000,      interval: '15 minutes'},
-  { label: '1H',  ms: 60 * 60 * 1000,      interval: '1 hour'    },
-  { label: '4H',  ms: 4 * 60 * 60 * 1000,  interval: '4 hours'   },
-  { label: '1D',  ms: 24 * 60 * 60 * 1000, interval: '1 day'     },
+  { label: '1m',  ms: 60 * 1000,            interval: '1 minute'   },
+  { label: '5m',  ms: 5 * 60 * 1000,        interval: '5 minutes'  },
+  { label: '15m', ms: 15 * 60 * 1000,       interval: '15 minutes' },
+  { label: '1H',  ms: 60 * 60 * 1000,       interval: '1 hour'     },
+  { label: '4H',  ms: 4 * 60 * 60 * 1000,   interval: '4 hours'    },
+  { label: '1D',  ms: 24 * 60 * 60 * 1000,  interval: '1 day'      },
 ]
 
 function buildCandles(
@@ -45,32 +44,21 @@ function buildCandles(
   timeframeMs: number
 ): OhlcCandle[] {
   if (ticks.length === 0) return []
-
   const buckets = new Map<number, { open: number; high: number; low: number; close: number }>()
-
   for (const tick of ticks) {
-    const bucketTime = Math.floor(tick.time / timeframeMs) * timeframeMs
-    if (!buckets.has(bucketTime)) {
-      buckets.set(bucketTime, {
-        open:  tick.price,
-        high:  tick.price,
-        low:   tick.price,
-        close: tick.price,
-      })
+    const t = Math.floor(tick.time / timeframeMs) * timeframeMs
+    if (!buckets.has(t)) {
+      buckets.set(t, { open: tick.price, high: tick.price, low: tick.price, close: tick.price })
     } else {
-      const c = buckets.get(bucketTime)!
+      const c = buckets.get(t)!
       c.high  = Math.max(c.high, tick.price)
       c.low   = Math.min(c.low,  tick.price)
       c.close = tick.price
     }
   }
-
   return Array.from(buckets.entries())
     .sort(([a], [b]) => a - b)
-    .map(([time, ohlc]) => ({
-      time: Math.floor(time / 1000) as Time,
-      ...ohlc,
-    }))
+    .map(([time, ohlc]) => ({ time: Math.floor(time / 1000) as Time, ...ohlc }))
 }
 
 function fmt(n: number): string {
@@ -79,7 +67,7 @@ function fmt(n: number): string {
   return n.toPrecision(4)
 }
 
-export default function PriceChart({ market, loading, error }: PriceChartProps) {
+export default function PriceChart({ market, error }: PriceChartProps) {
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(TIMEFRAMES[0])
   const [candles, setCandles]                     = useState<OhlcCandle[]>([])
   const [currentPrice, setCurrentPrice]           = useState<string>('—')
@@ -90,7 +78,7 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
   const seriesRef         = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const ticksRef          = useRef<{ time: number; price: number }[]>([])
 
-  // Reset everything when market changes
+  // Reset on market change
   useEffect(() => {
     ticksRef.current = []
     setCandles([])
@@ -106,125 +94,89 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
   // Poll Pyth Hermes every 1s
   useEffect(() => {
     if (!market) return
-
     const poll = async () => {
       const { price } = await injectiveClient.getCurrentPrice(market)
       if (price === '0') return
-
       const num = parseFloat(price)
       if (isNaN(num) || num <= 0) return
-
       setCurrentPrice(fmt(num))
       ticksRef.current = [...ticksRef.current, { time: Date.now(), price: num }].slice(-10000)
       setCandles(buildCandles(ticksRef.current, selectedTimeframe.ms))
     }
-
     poll()
-    const interval = setInterval(poll, 1000)
-    return () => clearInterval(interval)
+    const id = setInterval(poll, 1000)
+    return () => clearInterval(id)
   }, [market, selectedTimeframe.ms])
 
-  // Initialize chart via ResizeObserver so we only create it once the
-  // container has real pixel dimensions — avoids the height:0 race condition
+  // Initialize chart — runs once on mount, ref div is always present
   useEffect(() => {
-    if (!market) return
     const container = chartContainerRef.current
     if (!container) return
 
-    let resizeHandler: (() => void) | null = null
-
-    const observer = new ResizeObserver(entries => {
-      const entry = entries[0]
-      if (!entry) return
-      const { width, height } = entry.contentRect
-      if (width === 0 || height === 0) return
-
-      // Only initialize once
-      observer.disconnect()
-
-      const chart = createChart(container, {
-        layout: {
-          background: { type: ColorType.Solid, color: '#111827' },
-          textColor: '#9CA3AF',
-        },
-        grid: {
-          vertLines: { color: '#1F2937' },
-          horzLines: { color: '#1F2937' },
-        },
-        crosshair: {
-          vertLine: { color: '#4B5563', labelBackgroundColor: '#374151' },
-          horzLine: { color: '#4B5563', labelBackgroundColor: '#374151' },
-        },
-        width,
-        height,
-        timeScale: {
-          borderColor: '#374151',
-          timeVisible: true,
-          secondsVisible: true,
-        },
-        rightPriceScale: {
-          borderColor: '#374151',
-          scaleMargins: { top: 0.1, bottom: 0.15 },
-        },
-      })
-
-      const series = chart.addSeries(CandlestickSeries, {
-        upColor:         '#10B981',
-        downColor:       '#EF4444',
-        borderUpColor:   '#10B981',
-        borderDownColor: '#EF4444',
-        wickUpColor:     '#10B981',
-        wickDownColor:   '#EF4444',
-        priceFormat: {
-          type: 'price',
-          precision: 4,
-          minMove: 0.0001,
-        },
-      })
-
-      chart.subscribeCrosshairMove(param => {
-        if (!param?.time) {
-          setHoveredCandle(null)
-          return
-        }
-        const data = param.seriesData.get(series) as OhlcCandle | undefined
-        setHoveredCandle(data ?? null)
-      })
-
-      chartRef.current  = chart
-      seriesRef.current = series
-
-      // Seed with any ticks that arrived before the chart was ready
-      const initial = buildCandles(ticksRef.current, selectedTimeframe.ms)
-      if (initial.length > 0) {
-        series.setData(initial)
-        chart.timeScale().scrollToRealTime()
-      }
-
-      resizeHandler = () => {
-        if (chartRef.current && chartContainerRef.current) {
-          chartRef.current.applyOptions({
-            width: chartContainerRef.current.clientWidth,
-          })
-        }
-      }
-      window.addEventListener('resize', resizeHandler)
+    const chart = createChart(container, {
+      layout: {
+        background: { type: ColorType.Solid, color: '#111827' },
+        textColor: '#9CA3AF',
+      },
+      grid: {
+        vertLines: { color: '#1F2937' },
+        horzLines: { color: '#1F2937' },
+      },
+      crosshair: {
+        vertLine: { color: '#4B5563', labelBackgroundColor: '#374151' },
+        horzLine: { color: '#4B5563', labelBackgroundColor: '#374151' },
+      },
+      width: container.clientWidth,
+      height: container.clientHeight,
+      timeScale: {
+        borderColor: '#374151',
+        timeVisible: true,
+        secondsVisible: true,
+      },
+      rightPriceScale: {
+        borderColor: '#374151',
+        scaleMargins: { top: 0.1, bottom: 0.15 },
+      },
     })
 
-    observer.observe(container)
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor:         '#10B981',
+      downColor:       '#EF4444',
+      borderUpColor:   '#10B981',
+      borderDownColor: '#EF4444',
+      wickUpColor:     '#10B981',
+      wickDownColor:   '#EF4444',
+      priceFormat: { type: 'price', precision: 4, minMove: 0.0001 },
+    })
 
-    return () => {
-      observer.disconnect()
-      if (resizeHandler) window.removeEventListener('resize', resizeHandler)
-      if (chartRef.current) {
-        chartRef.current.remove()
-        chartRef.current  = null
-        seriesRef.current = null
+    chart.subscribeCrosshairMove(param => {
+      if (!param?.time) { setHoveredCandle(null); return }
+      const data = param.seriesData.get(series) as OhlcCandle | undefined
+      setHoveredCandle(data ?? null)
+    })
+
+    chartRef.current  = chart
+    seriesRef.current = series
+
+    const handleResize = () => {
+      if (chartRef.current && chartContainerRef.current) {
+        chartRef.current.applyOptions({
+          width:  chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight,
+        })
       }
     }
-  }, [market])
+    window.addEventListener('resize', handleResize)
 
-  // Push candle updates to existing chart series
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      chart.remove()
+      chartRef.current  = null
+      seriesRef.current = null
+    }
+  }, []) // empty deps — chart is created once, never recreated
+
+  // Push candle data into existing series
   useEffect(() => {
     if (!seriesRef.current || candles.length === 0) return
     seriesRef.current.setData(candles)
@@ -233,8 +185,8 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
 
   const stats = useMemo(() => {
     if (candles.length === 0) return null
-    const first = candles[0]
-    const last  = candles[candles.length - 1]
+    const first  = candles[0]
+    const last   = candles[candles.length - 1]
     const change = last.close - first.open
     const pct    = (change / first.open) * 100
     return {
@@ -247,22 +199,18 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
     }
   }, [candles])
 
-  if (loading && candles.length === 0) {
-    return <div className="bg-gray-900 rounded-xl p-6 h-96"><Loader /></div>
-  }
-
-  if (error && candles.length === 0) {
+  if (!market) {
     return (
-      <div className="bg-gray-900 rounded-xl p-6 h-96 flex items-center justify-center text-red-400">
-        {error}
+      <div className="bg-gray-800/50 rounded-xl p-6 border border-gray-700/50 flex items-center justify-center" style={{ height: '520px' }}>
+        <span className="text-gray-500">Select a market</span>
       </div>
     )
   }
 
-  if (!market) {
+  if (error) {
     return (
-      <div className="bg-gray-900 rounded-xl p-6 h-96 flex items-center justify-center text-gray-500">
-        Select a market
+      <div className="bg-gray-800/50 rounded-xl p-6 border border-gray-700/50 flex items-center justify-center" style={{ height: '520px' }}>
+        <span className="text-red-400">{error}</span>
       </div>
     )
   }
@@ -275,10 +223,9 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
         <div>
           <h3 className="text-lg font-semibold text-gray-300">{market.ticker}</h3>
           <p className="text-sm text-gray-500">
-            {selectedTimeframe.interval} • {candles.length} candles • {ticksRef.current.length} ticks
+            {selectedTimeframe.interval} • {candles.length} candles
           </p>
         </div>
-
         <div className="flex items-center gap-6">
           {/* Timeframe buttons */}
           <div className="flex gap-1">
@@ -296,7 +243,6 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
               </button>
             ))}
           </div>
-
           {/* Live price */}
           <div className="text-right">
             <div className="text-xs text-gray-500 mb-0.5">Last Price</div>
@@ -306,7 +252,7 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
         </div>
       </div>
 
-      {/* OHLC hover tooltip */}
+      {/* OHLC hover row */}
       <div className="flex gap-4 text-xs font-mono mb-2" style={{ minHeight: '16px' }}>
         {hoveredCandle ? (
           <>
@@ -324,16 +270,22 @@ export default function PriceChart({ market, loading, error }: PriceChartProps) 
         )}
       </div>
 
-      {/* Chart area */}
-      {candles.length === 0 ? (
-        <div className="w-full flex flex-col items-center justify-center text-gray-500 gap-2" style={{ height: '400px' }}>
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
-          <span className="text-sm">Collecting price data...</span>
-          <span className="text-xs text-gray-600">First candle forms after enough ticks at this timeframe</span>
-        </div>
-      ) : (
-        <div ref={chartContainerRef} style={{ width: '100%', height: '400px' }} />
-      )}
+      {/* Chart container — always rendered so the ref is always valid */}
+      <div style={{ position: 'relative', width: '100%', height: '400px' }}>
+        <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />
+
+        {/* Loading overlay — sits on top until first candle arrives */}
+        {candles.length === 0 && (
+          <div
+            style={{ position: 'absolute', inset: 0 }}
+            className="flex flex-col items-center justify-center gap-2 bg-gray-900 rounded-lg"
+          >
+            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
+            <span className="text-sm text-gray-500">Collecting price data...</span>
+            <span className="text-xs text-gray-600">First candle forms after enough ticks</span>
+          </div>
+        )}
+      </div>
 
       {/* Stats bar */}
       {stats && (
